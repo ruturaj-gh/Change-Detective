@@ -1,0 +1,76 @@
+/**
+ * Fastify API server entry point.
+ *
+ * Binds to 127.0.0.1 (localhost only) by default.
+ * Registers all route plugins under the /api prefix.
+ * Recovers stale scans on startup.
+ * Starts the scheduler.
+ */
+import dotenv from "dotenv";
+// Workspace scripts run with apps/api as the working directory; keep the
+// documented root-level .env file as the single source of local config.
+dotenv.config({ path: "../../.env" });
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import { healthRoutes } from "./routes/health.js";
+import { scanRoutes } from "./routes/scans.js";
+import { findingRoutes } from "./routes/findings.js";
+import { settingsRoutes } from "./routes/settings.js";
+import { deviceRoutes } from "./routes/devices.js";
+import { recoverStaleScan } from "./services/scan.service.js";
+import { startScheduler, stopScheduler } from "./scheduler/scheduler.js";
+import { prisma } from "./db/client.js";
+
+const HOST = process.env["API_HOST"] ?? "127.0.0.1";
+const PORT = parseInt(process.env["API_PORT"] ?? "3001", 10);
+
+const fastify = Fastify({
+  logger: {
+    level: process.env["NODE_ENV"] === "production" ? "warn" : "info",
+  },
+});
+
+// CORS — allow only localhost origins (the Next.js dev server).
+await fastify.register(cors, {
+  origin: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    `http://localhost:${PORT}`,
+  ],
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+});
+
+// Register routes under /api prefix.
+await fastify.register(healthRoutes, { prefix: "/api" });
+await fastify.register(scanRoutes, { prefix: "/api" });
+await fastify.register(findingRoutes, { prefix: "/api" });
+await fastify.register(settingsRoutes, { prefix: "/api" });
+await fastify.register(deviceRoutes, { prefix: "/api" });
+
+// Graceful shutdown.
+const shutdown = async (signal: string) => {
+  fastify.log.info(`Received ${signal}, shutting down...`);
+  stopScheduler();
+  await fastify.close();
+  await prisma.$disconnect();
+  process.exit(0);
+};
+
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+// Startup.
+try {
+  // Recover stale scans from a previous crash before accepting requests.
+  await recoverStaleScan();
+
+  await fastify.listen({ host: HOST, port: PORT });
+  fastify.log.info(`API listening on http://${HOST}:${PORT}`);
+
+  // Start the scheduler after the server is ready.
+  startScheduler();
+} catch (err) {
+  fastify.log.error(err);
+  process.exit(1);
+}
+
