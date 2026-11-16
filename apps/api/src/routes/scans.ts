@@ -15,6 +15,7 @@ import {
   getScanDirectories,
   getScanChanges,
   InvalidScanComparisonError,
+  NoEnrolledAgentError,
 } from "../services/scan.service.js";
 
 const PaginationSchema = z.object({
@@ -29,7 +30,18 @@ const ComparisonQuerySchema = z.object({
 export const scanRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /api/scans
   fastify.post("/scans", async (_req, reply) => {
-    const result = await startScan("manual");
+    let result;
+    try {
+      result = await startScan("manual");
+    } catch (error) {
+      if (error instanceof NoEnrolledAgentError) {
+        return reply.status(503).send({
+          error: "NO_ENROLLED_AGENT",
+          message: error.message,
+        });
+      }
+      throw error;
+    }
 
     if (result.status === "already_running") {
       return reply.status(409).send({

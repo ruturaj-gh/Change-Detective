@@ -1,10 +1,17 @@
 node_modules/
 dist/
 .env
-*.env.local
+.env.*
+!.env.example
 .next/
 *.log
 coverage/
 .prisma/
 prisma/generated/
+*.tsbuildinfo
+apps/api/data/
+*.tmp
+*.pid
+.DS_Store
+Thumbs.db
 

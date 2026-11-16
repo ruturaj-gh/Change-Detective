@@ -8,10 +8,29 @@ import { getOrCreateDeviceId } from "../config/device-id.js";
 
 export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get("/devices", async (_req, reply) => {
-    const deviceId = await getOrCreateDeviceId();
-    const devices = await prisma.device.findMany({
-      where: { id: deviceId },
-    });
+    const agentMode = process.env["SCAN_MODE"] === "agent";
+    const devices = agentMode
+      ? (await prisma.device.findMany({
+          where: { agentTokenHash: { not: null } },
+          select: {
+            id: true,
+            name: true,
+            osName: true,
+            monitoredRoot: true,
+            createdAt: true,
+            lastSeenAt: true,
+          },
+        })).map((device) => ({ ...device, isAgent: true }))
+      : (await prisma.device.findMany({
+          where: { id: await getOrCreateDeviceId() },
+          select: {
+            id: true,
+            name: true,
+            osName: true,
+            createdAt: true,
+            lastSeenAt: true,
+          },
+        })).map((device) => ({ ...device, isAgent: false }));
     return reply.send({ devices });
   });
 };

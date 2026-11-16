@@ -1,11 +1,11 @@
 # Change Detective
 
-> **Local-first Windows app** — understand what changed on your computer, starting with disk/storage growth.
+> **Browser-based storage history** — understand what changed on your computer, starting with disk/storage growth.
 
-Change Detective scans your drive's directories, stores timestamped snapshots in PostgreSQL, compares successive scans, and presents changes and warnings in a local web dashboard.
+The dashboard is a web app. Local development can run the API, scanner, and PostgreSQL on Linux or Windows. The hosted direction is a single-user dashboard with sign-in and a Linux agent that connects outbound to report scans.
 
 > [!NOTE]
-> **Current status:** Scanner, API, and dashboard are implemented. Local end-to-end use requires PostgreSQL and a configured root `.env` file.
+> **Current status:** Linux/Windows local scanning, single-user authentication, and an outbound Linux agent protocol are implemented. The agent flow still needs validation against a live database and HTTPS deployment. Do not expose the service publicly until you have completed those checks and configured an HTTPS reverse proxy.
 
 ---
 
@@ -17,11 +17,11 @@ Change Detective scans your drive's directories, stores timestamped snapshots in
 |---|---|
 | Node.js | v20+ (tested on v25.9.0) |
 | npm | v7+ |
-| PostgreSQL | 14+ (natively installed on Windows, not Docker) |
+| PostgreSQL | 14+ |
 
 ### 1. Clone and install
 
-```powershell
+```bash
 git clone <repo-url> change-detective
 cd change-detective
 npm install
@@ -29,11 +29,25 @@ npm install
 
 ### 2. Configure environment
 
-```powershell
-copy .env.example .env
+```bash
+cp .env.example .env
 # Edit .env and set your DATABASE_URL:
 # DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/change_detective
 ```
+
+For local development, sign-in is disabled unless authentication variables are set.
+Production mode fails to start unless `AUTH_EMAIL`, `AUTH_PASSWORD_HASH`, and
+`AUTH_SECRET` are configured. Generate the password hash interactively (input is
+not echoed) with:
+
+```bash
+npm run auth:hash-password --workspace @change-detective/api
+openssl rand -hex 32
+```
+
+Copy the hash and a newly generated secret into the server's environment. A
+production deployment must use HTTPS and keep the API behind the web app or a
+trusted private network; do not expose the API port directly.
 
 ### 3. Create the database
 
@@ -44,28 +58,64 @@ CREATE DATABASE change_detective;
 
 ### 4. Run migrations and seed the local device
 
-```powershell
+```bash
 npm run db:migrate --workspace @change-detective/api
 npm run db:seed --workspace @change-detective/api
 ```
 
 ### 5. Start the API and dashboard
 
-```powershell
-# Terminal 1: API at http://127.0.0.1:3001
-npm run dev --workspace @change-detective/api
-
-# Terminal 2: dashboard at http://localhost:3000
-npm run dev --workspace @change-detective/web
+```bash
+npm run dev
 ```
+
+This builds the scanner package, then starts the API and dashboard concurrently.
+Open `http://localhost:3000` in your browser.
 
 ### 6. Verify
 
-```powershell
+```bash
 curl http://127.0.0.1:3001/api/health
 # {"api":"ok","database":"ok","timestamp":"..."}
 # Then open http://localhost:3000 in your browser.
 ```
+
+## Hosted Linux agent (early implementation)
+
+The agent polls the API over HTTPS for scan requests and uploads directory-level
+measurements. It does not open an inbound port. It only scans the absolute root
+configured in its local agent file; a different root received from the server is
+refused. Agent credentials are saved under
+`$XDG_CONFIG_HOME/change-detective/agent.json` (or `~/.config/...`) with
+directory/file permissions `0700`/`0600`.
+
+For a hosted setup:
+
+1. Apply migrations and configure the API with `SCAN_MODE=agent`, production
+   authentication variables, and PostgreSQL. Keep the API private behind the
+   web application/reverse proxy; expose only the HTTPS web endpoint.
+2. Sign in, open **Settings**, and create a one-time enrollment token.
+3. On the Linux computer, clone/install this project, paste the token at the
+   hidden prompt shown in Settings, and run
+   `npm run agent:start --workspace @change-detective/agent`. The enrollment
+   token expires after 15 minutes and is single-use.
+4. Keep the Linux agent process running. Dashboard scans are queued for it;
+   it polls every 30 seconds and renews long-running task leases.
+5. To revoke access, use **Revoke access** in Settings. Existing snapshots are
+   retained, while queued/running scans are failed.
+
+The agent is currently started in a foreground terminal; a systemd service,
+installer, deployment automation, and live database/reverse-proxy validation
+are still future work. If changing the monitored root, update the local agent
+configuration file as well. After revoking an agent, remove its saved local
+credential before enrolling it again:
+
+```bash
+rm -- "${XDG_CONFIG_HOME:-$HOME/.config}/change-detective/agent.json"
+```
+
+Never put the enrollment token or agent bearer token in a command-line
+argument, source control, or logs.
 
 ---
 
@@ -76,11 +126,11 @@ curl http://127.0.0.1:3001/api/health
 | `npm install` | Install all workspace dependencies |
 | `npm test` | Run all tests across all packages |
 | `npm run typecheck` | Type-check all packages |
-| `npm run dev` | Start all apps in dev mode |
+| `npm run dev` | Build the scanner and start the API and dashboard in parallel |
 
 ### Per-package
 
-```powershell
+```bash
 # Scanner tests
 cd packages/scanner && npm test
 
@@ -109,9 +159,11 @@ change-detective/
 │   │   │   ├── config/       Device ID management
 │   │   │   └── db/           Prisma client + seed
 │   │   └── prisma/           schema.prisma + migrations
-│   └── web/          Next.js dashboard (port 3000) — coming in Phase 4
+│   ├── agent/        Linux agent that polls the API and uploads scan results
+│   │   └── src/
+│   └── web/          Next.js browser dashboard (port 3000)
 ├── packages/
-│   └── scanner/      Isolated Windows filesystem scanner (no DB dependency)
+│   └── scanner/      Cross-platform filesystem scanner (no DB dependency)
 └── db/               Reference SQL (Prisma manages actual migrations)
 ```
 
@@ -120,9 +172,13 @@ change-detective/
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | API + database status |
-| `GET` | `/api/devices` | Local device info |
+| `GET` | `/api/devices` | Local or enrolled agent device info |
 | `GET` | `/api/scans` | List recent scans |
 | `POST` | `/api/scans` | Start a manual scan (async, 202) |
+| `POST` | `/api/agents/enrollment` | Issue one-time agent enrollment token (signed-in user) |
+| `POST` | `/api/agent/enroll` | Consume enrollment token and receive agent credential |
+| `GET` | `/api/agent/tasks/next` | Poll for a scan task (agent bearer credential) |
+| `POST` | `/api/agent/scans/:id/results` | Submit a scan result (agent bearer credential) |
 | `GET` | `/api/scans/:id` | Scan status and summary |
 | `GET` | `/api/scans/:id/directories` | Directory measurements |
 | `GET` | `/api/scans/:id/changes` | Delta vs previous scan; optional `previousScanId` selects an earlier baseline from the same root |
@@ -147,7 +203,8 @@ change-detective/
 
 - The API binds to `127.0.0.1` (localhost only) by default. **Do not expose it to the network.**
 - Database credentials stay in `.env` — never commit `.env`.
-- No telemetry is sent off-device.
+- The hosted dashboard requires sign-in; local development authentication is disabled by default.
+- The Linux agent sends measurements only to its enrolled service over HTTPS.
 - The scanner never reads file contents or computes hashes.
 - No files are deleted or modified by this tool.
 
@@ -157,13 +214,13 @@ change-detective/
 
 ### Backup
 
-```powershell
+```bash
 pg_dump -U postgres change_detective -F c -f change_detective_backup.dump
 ```
 
 ### Restore
 
-```powershell
+```bash
 pg_restore -U postgres -d change_detective change_detective_backup.dump
 ```
 
@@ -198,7 +255,7 @@ DELETE FROM scans WHERE started_at < NOW() - INTERVAL '90 days'
 | `DATABASE_URL` error | Verify `.env` has correct credentials |
 | Migration error | Check `npx prisma migrate status` |
 | Scan stuck in `running` | Restart the API — stale scans are recovered automatically on startup |
-| Symlink test skipped | Run tests as Administrator to enable symlink creation |
+| Symlink test skipped | Check whether your user has permission to create symlinks in the test environment |
 
 ---
 
@@ -209,7 +266,7 @@ DELETE FROM scans WHERE started_at < NOW() - INTERVAL '90 days'
 | Language | TypeScript (strict) | All packages |
 | API | Fastify 4 | Localhost-only |
 | ORM / DB | Prisma 5 + PostgreSQL | Committed migrations |
-| Scanner | Node.js `fs/promises` | No DB dependency |
+| Scanner | Node.js `fs/promises` | Linux and Windows paths |
 | Validation | Zod | API input + settings |
 | Tests | Vitest | All packages |
 | Frontend | Next.js (planned) | Phase 4 |

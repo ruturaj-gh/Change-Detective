@@ -12,6 +12,11 @@ import dotenv from "dotenv";
 dotenv.config({ path: "../../.env" });
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
+import { createSessionGuard, loadAuthConfig } from "./auth/session.js";
+import { authRoutes } from "./routes/auth.js";
+import { agentRoutes } from "./routes/agent.js";
+import { agentsRoutes } from "./routes/agents.js";
 import { healthRoutes } from "./routes/health.js";
 import { scanRoutes } from "./routes/scans.js";
 import { findingRoutes } from "./routes/findings.js";
@@ -23,10 +28,16 @@ import { prisma } from "./db/client.js";
 
 const HOST = process.env["API_HOST"] ?? "127.0.0.1";
 const PORT = parseInt(process.env["API_PORT"] ?? "3001", 10);
+const authConfig = loadAuthConfig();
 
 const fastify = Fastify({
+  bodyLimit: 10 * 1024 * 1024,
   logger: {
     level: process.env["NODE_ENV"] === "production" ? "warn" : "info",
+    redact: {
+      paths: ["req.headers.authorization", "req.headers.cookie"],
+      censor: "[REDACTED]",
+    },
   },
 });
 
@@ -40,7 +51,18 @@ await fastify.register(cors, {
   methods: ["GET", "POST", "PATCH", "DELETE"],
 });
 
+await fastify.register(rateLimit, { global: false });
+
+fastify.addHook("onRequest", createSessionGuard(authConfig));
+fastify.addHook("onSend", async (_request, reply, payload) => {
+  reply.header("Cache-Control", "no-store");
+  return payload;
+});
+
 // Register routes under /api prefix.
+await fastify.register(authRoutes, { prefix: "/api", authConfig });
+await fastify.register(agentsRoutes, { prefix: "/api" });
+await fastify.register(agentRoutes, { prefix: "/api" });
 await fastify.register(healthRoutes, { prefix: "/api" });
 await fastify.register(scanRoutes, { prefix: "/api" });
 await fastify.register(findingRoutes, { prefix: "/api" });

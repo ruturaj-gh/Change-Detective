@@ -6,6 +6,18 @@ implementation guide\
 **Primary goal:** Give this document to a coding agent as the canonical
 project brief.
 
+> **Updated direction:** The agreed target is a single-user hosted web
+> dashboard, accessible over the internet with sign-in, plus a Linux
+> agent on the user's computer. The agent must initiate an authenticated,
+> encrypted outbound connection and scan only user-approved local paths.
+> Single-user email/password authentication and a Linux agent's
+> one-time enrollment, outbound polling, scan delivery, and revocation
+> foundations are implemented. They still require live database and
+> HTTPS deployment validation. Do not expose the service publicly until
+> those checks and production deployment configuration are complete.
+> The Windows-first MVP requirements below are historical and are
+> superseded wherever they conflict with this direction.
+
 ------------------------------------------------------------------------
 
 ## 1. Executive summary

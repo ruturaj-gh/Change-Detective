@@ -1,18 +1,17 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Sidebar } from "@/components/layout/Sidebar";
+import { AuthShell } from "@/components/layout/AuthShell";
 
 export const metadata: Metadata = {
   title: "Change Detective",
-  description: "Local storage change monitor",
+  description: "Storage change monitoring dashboard",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body className="flex h-screen bg-bg-page text-white overflow-hidden">
-        <Sidebar />
-        <main className="flex-1 overflow-y-auto">{children}</main>
+        <AuthShell>{children}</AuthShell>
       </body>
     </html>
   );

@@ -6,7 +6,10 @@
 const BASE = "/api";
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  const res = await fetch(`${BASE}${path}`, {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
   if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -14,6 +17,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -24,10 +28,20 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 async function patch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "PATCH",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`PATCH ${path} → ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}`);
   return res.json() as Promise<T>;
 }
 
@@ -44,6 +58,8 @@ export interface Device {
   id: string;
   name: string;
   osName: string;
+  monitoredRoot?: string | null;
+  isAgent: boolean;
   createdAt: string;
   lastSeenAt: string | null;
 }
@@ -120,6 +136,54 @@ export interface SettingsUpdate {
 // ── API calls ──────────────────────────────────────────────────────────────
 
 export const api = {
+  auth: {
+    session: async (): Promise<{
+      authenticated: boolean;
+      authenticationEnabled: boolean;
+      email?: string;
+    }> => {
+      const res = await fetch(`${BASE}/auth/session`, {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (res.status === 401) {
+        return { authenticated: false, authenticationEnabled: true };
+      }
+      if (!res.ok) {
+        throw new Error(`Could not check sign-in status (${res.status}).`);
+      }
+      return res.json();
+    },
+    login: async (email: string, password: string) => {
+      const res = await fetch(`${BASE}/auth/login`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      if (res.status === 401) {
+        throw new Error("Email or password is incorrect.");
+      }
+      if (res.status === 429) {
+        throw new Error("Too many sign-in attempts. Try again in 15 minutes.");
+      }
+      if (!res.ok) {
+        throw new Error(`Sign-in failed (${res.status}).`);
+      }
+      return res.json() as Promise<{ authenticated: boolean; email: string }>;
+    },
+    logout: () => post<{ authenticated: boolean }>("/auth/logout"),
+  },
+
+  agents: {
+    enroll: () =>
+      post<{ enrollmentToken: string; expiresAt: string }>(
+        "/agents/enrollment"
+      ),
+    revoke: (id: string) =>
+      del<{ revoked: boolean }>(`/agents/${encodeURIComponent(id)}`),
+  },
+
   health: () => get<HealthResponse>("/health"),
 
   devices: () => get<{ devices: Device[] }>("/devices"),

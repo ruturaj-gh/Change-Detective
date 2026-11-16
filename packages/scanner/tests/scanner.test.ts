@@ -391,12 +391,19 @@ describe("scan() — two-scan comparison semantics", () => {
 });
 
 describe("normalizePath()", () => {
-  it("lowercases the path", () => {
+  it("normalizes Windows paths case-insensitively", () => {
     expect(normalizePath("C:\\Users\\Alice")).toBe("c:/users/alice");
   });
 
-  it("converts backslashes to forward slashes", () => {
+  it("uses forward slashes for Windows paths", () => {
     expect(normalizePath("D:\\foo\\bar")).toBe("d:/foo/bar");
+  });
+
+  it("preserves case in POSIX paths", () => {
+    const path = "/home/Example/Documents";
+    expect(normalizePath(path)).toBe(
+      process.platform === "win32" ? path.toLowerCase() : path
+    );
   });
 
   it("is idempotent", () => {

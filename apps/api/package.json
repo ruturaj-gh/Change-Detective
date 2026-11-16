@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:scanner": "npm run build --workspace @change-detective/scanner",
+    "predev": "npm run build:scanner",
+    "prebuild": "npm run build:scanner",
+    "pretypecheck": "npm run build:scanner",
+    "pretest": "npm run build:scanner",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -11,6 +16,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
     "db:generate": "prisma generate",
+    "auth:hash-password": "tsx src/auth/hash-password.ts",
     "db:seed": "tsx src/db/seed.ts",
     "db:studio": "prisma studio"
   },
@@ -19,6 +25,7 @@
     "@prisma/client": "^5.19.0",
     "fastify": "^4.28.1",
     "@fastify/cors": "^9.0.1",
+    "@fastify/rate-limit": "^9.1.0",
     "zod": "^3.23.8",
     "uuid": "^10.0.0",
     "dotenv": "^16.4.5"

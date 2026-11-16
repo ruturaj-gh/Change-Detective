@@ -14,7 +14,7 @@
 
 /** Options passed to the top-level scan function. */
 export interface ScanOptions {
-  /** Absolute Windows path of the drive or directory to scan (e.g. "C:\\"). */
+  /** Absolute path of the drive or directory to scan (e.g. "C:\\" or "/home/user"). */
   rootPath: string;
 
   /**
@@ -64,8 +64,8 @@ export interface ScanProgress {
 export interface DirectoryMeasurement {
   /**
    * Normalised path for comparison across scans.
-   * Lower-cased, forward-slash separators removed.
-   * Example: "c:\\users\\alice\\documents" normalises to "c:/users/alice/documents".
+   * Windows paths are lower-cased with forward-slash separators.
+   * POSIX paths retain case. Example: "/home/alice/Documents".
    */
   normalizedPath: string;
 

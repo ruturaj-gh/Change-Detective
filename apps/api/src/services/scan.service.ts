@@ -28,6 +28,8 @@ export interface StartScanResult {
   existingScanId?: string | undefined;
 }
 
+export class NoEnrolledAgentError extends Error {}
+
 /**
  * Starts a manual scan asynchronously.
  * Returns the scan ID immediately (202-style) and runs the scan in the background.
@@ -35,27 +37,42 @@ export interface StartScanResult {
 export async function startScan(
   triggerType: "manual" | "scheduled"
 ): Promise<StartScanResult> {
-  const deviceId = await getOrCreateDeviceId();
+  const agentMode = process.env["SCAN_MODE"] === "agent";
   const settings = await prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
-  const rootPath = settings.monitoredRoot;
+  const device = agentMode
+    ? await prisma.device.findFirst({
+        where: { agentTokenHash: { not: null } },
+        orderBy: { lastSeenAt: "desc" },
+        select: { id: true, monitoredRoot: true },
+      })
+    : null;
+  if (agentMode && !device) {
+    throw new NoEnrolledAgentError("Enroll a Linux agent before starting scans.");
+  }
+  const deviceId = device?.id ?? (await getOrCreateDeviceId());
+  const rootPath = device?.monitoredRoot ?? settings.monitoredRoot;
+  if (agentMode && (!device?.monitoredRoot || rootPath !== settings.monitoredRoot)) {
+    throw new NoEnrolledAgentError(
+      "The monitored root does not match the enrolled agent's approved root."
+    );
+  }
   const normalizedRoot = normalizePath(rootPath);
 
   // Concurrency check — prevent overlapping scans for the same root.
-  if (runningScanRoots.has(normalizedRoot)) {
-    // Find the current running scan ID for the response.
-    const existingScan = await prisma.scan.findFirst({
-      where: {
-        deviceId,
-        rootPath: normalizedRoot,
-        status: { in: ["queued", "running"] },
-      },
-      orderBy: { startedAt: "desc" },
-      select: { id: true },
-    });
+  const existingScan = await prisma.scan.findFirst({
+    where: {
+      deviceId,
+      rootPath: normalizedRoot,
+      status: { in: ["queued", "running"] },
+    },
+    orderBy: { startedAt: "desc" },
+    select: { id: true },
+  });
+  if (existingScan && (agentMode || runningScanRoots.has(normalizedRoot))) {
     return {
-      scanId: existingScan?.id ?? "unknown",
+      scanId: existingScan.id,
       status: "already_running" as const,
-      existingScanId: existingScan?.id ?? undefined,
+      existingScanId: existingScan.id,
     };
   }
 
@@ -72,8 +89,10 @@ export async function startScan(
     },
   });
 
-  // Fire and forget — do NOT await this.
-  void executeScan(scanId, deviceId, normalizedRoot, settings.lowSpaceThresholdPercent.toString());
+  if (!agentMode) {
+    // Fire and forget — do NOT await this.
+    void executeScan(scanId, deviceId, normalizedRoot, settings.lowSpaceThresholdPercent.toString());
+  }
 
   return { scanId, status: "queued" };
 }
@@ -205,6 +224,8 @@ const activeScanControllers = new Map<string, AbortController>();
  * from a previous crash/restart and mark them interrupted.
  */
 export async function recoverStaleScan(): Promise<void> {
+  if (process.env["SCAN_MODE"] === "agent") return;
+
   const deviceId = await getOrCreateDeviceId();
   const stale = await prisma.scan.findMany({
     where: {
@@ -246,9 +267,10 @@ export async function getScanById(scanId: string) {
  * List recent scans for the local device.
  */
 export async function listScans(limit = 50, offset = 0) {
-  const deviceId = await getOrCreateDeviceId();
+  const agentMode = process.env["SCAN_MODE"] === "agent";
+  const deviceId = agentMode ? null : await getOrCreateDeviceId();
   return prisma.scan.findMany({
-    where: { deviceId },
+    ...(deviceId ? { where: { deviceId } } : {}),
     orderBy: { startedAt: "desc" },
     take: limit,
     skip: offset,

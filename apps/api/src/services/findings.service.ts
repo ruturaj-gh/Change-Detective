@@ -154,10 +154,11 @@ function toJson(obj: Record<string, string | number | boolean | null | undefined
  * List findings for the local device.
  */
 export async function listFindings(limit = 100, offset = 0) {
+  const agentMode = process.env["SCAN_MODE"] === "agent";
   const { getOrCreateDeviceId } = await import("../config/device-id.js");
-  const deviceId = await getOrCreateDeviceId();
+  const deviceId = agentMode ? undefined : await getOrCreateDeviceId();
   return prisma.finding.findMany({
-    where: { deviceId },
+    ...(deviceId ? { where: { deviceId } } : {}),
     orderBy: { createdAt: "desc" },
     take: limit,
     skip: offset,

@@ -1,0 +1,24 @@
+{
+  "name": "@change-detective/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:scanner": "npm run build --workspace @change-detective/scanner",
+    "preagent:start": "npm run build:scanner",
+    "prebuild": "npm run build:scanner",
+    "pretypecheck": "npm run build:scanner",
+    "agent:start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@change-detective/scanner": "*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}

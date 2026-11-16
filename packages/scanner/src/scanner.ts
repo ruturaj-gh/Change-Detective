@@ -1,12 +1,12 @@
 /**
- * Change Detective — Windows top-level directory scanner.
+ * Change Detective — cross-platform top-level directory scanner.
  *
  * Scans a configured root directory, recursively measuring the size of each
  * immediate child directory using incremental traversal (no full tree in memory).
  *
  * Design constraints (from the project brief §11):
  * - Never reads file contents or computes hashes.
- * - Does not follow symlinks or junctions (Windows reparse points).
+ * - Does not follow symlinks or Windows reparse points.
  * - Handles permission errors and file disappearance without crashing.
  * - Marks measurements incomplete when full coverage is not possible.
  * - Uses bigint for all byte arithmetic; decimal strings at JSON boundaries.
@@ -16,7 +16,7 @@
  */
 
 import { opendir, stat } from "node:fs/promises";
-import { join, normalize } from "node:path";
+import { join, normalize, win32 } from "node:path";
 import type {
   ScanOptions,
   ScanResult,
@@ -352,14 +352,19 @@ function safeMessage(err: unknown): string {
 }
 
 /**
- * Normalises a Windows path for stable cross-scan comparison.
- * - Resolves . and .. segments.
- * - Converts backslashes to forward slashes.
- * - Lower-cases for case-insensitive comparison.
- * - Does NOT strip drive letter or UNC prefix.
+ * Normalises paths for stable cross-scan comparison. Windows paths are
+ * case-insensitive; POSIX paths preserve case because their filesystems may
+ * distinguish names that differ only by letter case.
  */
 export function normalizePath(p: string): string {
-  return normalize(p).replace(/\\/g, "/").toLowerCase();
+  const isWindowsPath =
+    process.platform === "win32" || /^[A-Za-z]:/.test(p) || p.startsWith("\\\\");
+
+  if (isWindowsPath) {
+    return win32.normalize(p).replace(/\\/g, "/").toLowerCase();
+  }
+
+  return normalize(p);
 }
 
 /**

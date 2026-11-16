@@ -9,13 +9,21 @@ import dotenv from "dotenv";
 dotenv.config({ path: "../../.env" });
 import { PrismaClient } from "@prisma/client";
 import { getOrCreateDeviceId } from "../config/device-id.js";
+import { homedir } from "node:os";
 
 const prisma = new PrismaClient();
 
 async function seed() {
   const deviceId = await getOrCreateDeviceId();
-  const os = process.env["OS"] ?? "Windows_NT";
   const hostname = (await import("node:os")).hostname();
+  const osName =
+    process.platform === "win32"
+      ? "Windows"
+      : process.platform === "darwin"
+        ? "macOS"
+        : process.platform === "linux"
+          ? "Linux"
+          : process.platform;
 
   // Upsert the local device row.
   await prisma.device.upsert({
@@ -23,18 +31,25 @@ async function seed() {
     create: {
       id: deviceId,
       name: hostname,
-      osName: os.startsWith("Windows") ? "Windows" : os,
+      osName,
       lastSeenAt: new Date(),
     },
     update: { lastSeenAt: new Date() },
   });
 
   // Upsert the settings row (id=1).
-  await prisma.settings.upsert({
+  const defaultRoot = process.platform === "win32" ? "C:\\" : homedir();
+  const settings = await prisma.settings.upsert({
     where: { id: 1 },
-    create: { id: 1 },
+    create: { id: 1, monitoredRoot: defaultRoot },
     update: {},
   });
+  if (process.platform !== "win32" && settings.monitoredRoot === "C:\\") {
+    await prisma.settings.update({
+      where: { id: 1 },
+      data: { monitoredRoot: defaultRoot },
+    });
+  }
 
   console.log(`✅ Seeded device ${deviceId} (${hostname}) and settings.`);
   await prisma.$disconnect();

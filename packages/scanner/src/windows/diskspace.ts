@@ -1,12 +1,12 @@
 /**
- * Windows disk-space adapter.
+ * Filesystem capacity adapter.
  *
  * Uses Node.js `fs.statfs` (available from Node 19+) to retrieve total
  * and free bytes for the filesystem containing the given path.
  *
- * Falls back to a PowerShell invocation when statfs is not available.
- * The PowerShell path is isolated here so it can be replaced or removed
- * without touching the main scanner.
+ * Falls back to PowerShell on Windows when statfs is not available. The
+ * fallback is isolated here so it can be replaced without touching the
+ * main scanner.
  */
 
 import { statfs } from "node:fs/promises";
