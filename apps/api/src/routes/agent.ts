@@ -7,7 +7,6 @@ import { z } from "zod";
 import {
   authenticateAgentToken,
   claimNextAgentTask,
-  AgentAlreadyEnrolledError,
   enrollAgent,
   InvalidAgentScanResultError,
   InvalidEnrollmentTokenError,
@@ -15,16 +14,7 @@ import {
   saveAgentScanResult,
 } from "../services/agent.service.js";
 import { AgentScanResultSchema } from "../schemas/agent.js";
-
-const EnrollmentSchema = z.object({
-  enrollmentToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-  name: z.string().trim().min(1).max(128),
-  osName: z.literal("Linux"),
-  monitoredRoot: z.string().trim().min(1).max(4096).refine(
-    (value) => value.startsWith("/") && !value.includes("\0"),
-    "Must be an absolute Linux path."
-  ),
-});
+import { AgentEnrollmentSchema } from "../schemas/agent-enrollment.js";
 
 function bearerToken(request: FastifyRequest): string | null {
   const authorization = request.headers.authorization;
@@ -48,7 +38,7 @@ async function authenticate(request: FastifyRequest, reply: FastifyReply) {
 
 export const agentRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/agent/enroll", async (request, reply) => {
-    const input = EnrollmentSchema.safeParse(request.body);
+    const input = AgentEnrollmentSchema.safeParse(request.body);
     if (!input.success) {
       return reply.status(400).send({
         error: "INVALID_ENROLLMENT",
@@ -67,9 +57,6 @@ export const agentRoutes: FastifyPluginAsync = async (fastify) => {
     } catch (error) {
       if (error instanceof InvalidEnrollmentTokenError) {
         return reply.status(401).send({ error: "INVALID_ENROLLMENT_TOKEN" });
-      }
-      if (error instanceof AgentAlreadyEnrolledError) {
-        return reply.status(409).send({ error: "AGENT_ALREADY_ENROLLED" });
       }
       throw error;
     }

@@ -15,6 +15,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { createSessionGuard, loadAuthConfig } from "./auth/session.js";
 import { authRoutes } from "./routes/auth.js";
+import { accountRoutes } from "./routes/account.js";
 import { agentRoutes } from "./routes/agent.js";
 import { agentsRoutes } from "./routes/agents.js";
 import { healthRoutes } from "./routes/health.js";
@@ -53,6 +54,8 @@ await fastify.register(cors, {
 
 await fastify.register(rateLimit, { global: false });
 
+fastify.decorateRequest("authUserId", null);
+fastify.decorateRequest("authEmail", null);
 fastify.addHook("onRequest", createSessionGuard(authConfig));
 fastify.addHook("onSend", async (_request, reply, payload) => {
   reply.header("Cache-Control", "no-store");
@@ -61,6 +64,7 @@ fastify.addHook("onSend", async (_request, reply, payload) => {
 
 // Register routes under /api prefix.
 await fastify.register(authRoutes, { prefix: "/api", authConfig });
+await fastify.register(accountRoutes, { prefix: "/api" });
 await fastify.register(agentsRoutes, { prefix: "/api" });
 await fastify.register(agentRoutes, { prefix: "/api" });
 await fastify.register(healthRoutes, { prefix: "/api" });

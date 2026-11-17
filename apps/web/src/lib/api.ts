@@ -14,14 +14,45 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface Account {
+  id: string;
+  email: string;
+  emailVerifiedAt: string | null;
+  privacyNoticeVersion: string | null;
+  privacyAcceptedAt: string | null;
+  createdAt: string;
+  deviceCount: number;
+  scanCount: number;
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
   });
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  if (!res.ok) {
+    let responseBody: unknown;
+    try {
+      responseBody = await res.json();
+    } catch {
+      throw new Error(`POST ${path} → ${res.status}`);
+    }
+    if (
+      responseBody !== null &&
+      typeof responseBody === "object" &&
+      "message" in responseBody &&
+      typeof responseBody.message === "string"
+    ) {
+      throw new Error(responseBody.message);
+    }
+    throw new Error(`POST ${path} → ${res.status}`);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -36,10 +67,16 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-async function del<T>(path: string): Promise<T> {
+async function del<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "DELETE",
     credentials: "same-origin",
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
   });
   if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}`);
   return res.json() as Promise<T>;
@@ -140,7 +177,7 @@ export const api = {
     session: async (): Promise<{
       authenticated: boolean;
       authenticationEnabled: boolean;
-      email?: string;
+      user?: { id: string; email: string };
     }> => {
       const res = await fetch(`${BASE}/auth/session`, {
         cache: "no-store",
@@ -154,25 +191,12 @@ export const api = {
       }
       return res.json();
     },
-    login: async (email: string, password: string) => {
-      const res = await fetch(`${BASE}/auth/login`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      if (res.status === 401) {
-        throw new Error("Email or password is incorrect.");
-      }
-      if (res.status === 429) {
-        throw new Error("Too many sign-in attempts. Try again in 15 minutes.");
-      }
-      if (!res.ok) {
-        throw new Error(`Sign-in failed (${res.status}).`);
-      }
-      return res.json() as Promise<{ authenticated: boolean; email: string }>;
-    },
     logout: () => post<{ authenticated: boolean }>("/auth/logout"),
+  },
+  account: {
+    get: () => get<{ account: Account }>("/account"),
+    delete: (confirmation: "DELETE") =>
+      del<{ deleted: boolean }>("/account", { confirmation }),
   },
 
   agents: {
@@ -186,12 +210,22 @@ export const api = {
 
   health: () => get<HealthResponse>("/health"),
 
-  devices: () => get<{ devices: Device[] }>("/devices"),
+  devices: () =>
+    get<{ devices: Device[]; scanMode: "local" | "agent" }>("/devices"),
+  updateDeviceRoot: (id: string, monitoredRoot: string) =>
+    patch<{ updated: boolean }>(
+      `/devices/${encodeURIComponent(id)}/root`,
+      { monitoredRoot }
+    ),
 
   scans: {
     list: () => get<{ scans: Scan[] }>("/scans"),
     get: (id: string) => get<{ scan: Scan }>(`/scans/${id}`),
-    start: () => post<{ scanId: string; status: string }>("/scans"),
+    start: (deviceId?: string) =>
+      post<{ scanId: string; status: string }>(
+        "/scans",
+        deviceId ? { deviceId } : undefined
+      ),
     directories: (id: string) =>
       get<{ directories: DirectorySnapshot[] }>(`/scans/${id}/directories`),
     changes: (id: string, previousScanId?: string) =>

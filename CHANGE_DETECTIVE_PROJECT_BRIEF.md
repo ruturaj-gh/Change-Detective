@@ -10,7 +10,7 @@ project brief.
 > dashboard, accessible over the internet with sign-in, plus a Linux
 > agent on the user's computer. The agent must initiate an authenticated,
 > encrypted outbound connection and scan only user-approved local paths.
-> Single-user email/password authentication and a Linux agent's
+> Google OAuth authentication and a cross-platform agent's
 > one-time enrollment, outbound polling, scan delivery, and revocation
 > foundations are implemented. They still require live database and
 > HTTPS deployment validation. Do not expose the service publicly until

@@ -1,76 +1,188 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
+import { OAuth2Client } from "google-auth-library";
 import { z } from "zod";
-import { verifyPassword } from "../auth/credentials.js";
+import { signInWithGoogle } from "../auth/accounts.js";
 import {
-  AuthConfig,
+  clearGoogleStateCookie,
   clearSessionCookie,
+  createGoogleStateCookie,
   createSessionCookie,
   createSessionToken,
-  getSessionCookie,
-  verifySessionToken,
+  GOOGLE_STATE_COOKIE_NAME,
+  type AuthConfig,
 } from "../auth/session.js";
 
 interface AuthRouteOptions {
-  authConfig: AuthConfig | null;
+  authConfig: AuthConfig;
 }
 
-const LoginSchema = z.object({
-  email: z.string().trim().email().max(254),
-  password: z.string().min(1).max(256),
+const GoogleStartQuery = z.object({ acceptPrivacy: z.literal("true") });
+const GoogleCallbackQuery = z.object({
+  code: z.string().min(1).max(4096).optional(),
+  state: z.string().min(32).max(128).optional(),
+  error: z.string().optional(),
 });
+
+function googleClient(config: AuthConfig): OAuth2Client | null {
+  if (!config.googleClientId || !config.googleClientSecret) return null;
+  const callbackUrl = new URL(
+    "/api/auth/google/callback",
+    config.publicAppUrl
+  ).toString();
+  return new OAuth2Client(
+    config.googleClientId,
+    config.googleClientSecret,
+    callbackUrl
+  );
+}
+
+function getCookie(
+  cookieHeader: string | undefined,
+  name: string
+): string | undefined {
+  if (!cookieHeader) return undefined;
+  const prefix = `${name}=`;
+  return cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length);
+}
+
+function safeEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return (
+    leftBuffer.length === rightBuffer.length &&
+    timingSafeEqual(leftBuffer, rightBuffer)
+  );
+}
+
+function loginErrorUrl(config: AuthConfig, error: string): string {
+  const url = new URL("/login", config.publicAppUrl);
+  url.searchParams.set("error", error);
+  return url.toString();
+}
 
 export const authRoutes: FastifyPluginAsync<AuthRouteOptions> = async (
   fastify,
   { authConfig }
 ) => {
-  fastify.post("/auth/login", {
-    config: { rateLimit: { max: 5, timeWindow: 15 * 60 * 1000 } },
-    handler: async (req, reply) => {
-      if (!authConfig) {
-        return reply.status(404).send({ error: "AUTHENTICATION_DISABLED" });
-      }
+  fastify.get("/auth/google", async (request, reply) => {
+    const query = GoogleStartQuery.safeParse(request.query);
+    if (!query.success) {
+      return reply.redirect(loginErrorUrl(authConfig, "privacy_required"));
+    }
 
-      const body = LoginSchema.safeParse(req.body);
-      if (!body.success) {
-        return reply.status(400).send({ error: "INVALID_CREDENTIALS" });
-      }
+    const client = googleClient(authConfig);
+    if (!client) {
+      return reply.redirect(loginErrorUrl(authConfig, "google_not_configured"));
+    }
 
-      const passwordMatches = await verifyPassword(
-        body.data.password,
-        authConfig.passwordHash
+    const state = randomBytes(32).toString("base64url");
+    const secure = process.env["NODE_ENV"] === "production";
+    return reply
+      .header("Set-Cookie", createGoogleStateCookie(state, secure))
+      .redirect(
+        client.generateAuthUrl({
+          access_type: "online",
+          prompt: "select_account",
+          scope: ["openid", "email", "profile"],
+          state,
+        })
       );
+  });
+
+  fastify.get("/auth/google/callback", {
+    logLevel: "silent",
+    handler: async (request, reply) => {
+      const query = GoogleCallbackQuery.safeParse(request.query);
+      const secure = process.env["NODE_ENV"] === "production";
+      const stateCookie = getCookie(
+        request.headers.cookie,
+        GOOGLE_STATE_COOKIE_NAME
+      );
+      const stateMatches =
+        query.success &&
+        query.data.state &&
+        stateCookie &&
+        safeEqual(query.data.state, stateCookie);
+      const clearState = clearGoogleStateCookie(secure);
+
       if (
-        body.data.email.toLowerCase() !== authConfig.email ||
-        !passwordMatches
+        !query.success ||
+        query.data.error ||
+        !query.data.code ||
+        !stateMatches
       ) {
-        return reply.status(401).send({ error: "INVALID_CREDENTIALS" });
+        return reply
+          .header("Set-Cookie", clearState)
+          .redirect(loginErrorUrl(authConfig, "google_auth_failed"));
       }
 
-      const token = createSessionToken(authConfig.email, authConfig.secret);
-      const secure = process.env["NODE_ENV"] === "production";
-      return reply
-        .header("Set-Cookie", createSessionCookie(token, secure))
-        .send({ authenticated: true, email: authConfig.email });
+      const client = googleClient(authConfig);
+      if (!client) {
+        return reply
+          .header("Set-Cookie", clearState)
+          .redirect(loginErrorUrl(authConfig, "google_not_configured"));
+      }
+
+      try {
+        const { tokens } = await client.getToken(query.data.code);
+        if (!tokens.id_token || !authConfig.googleClientId) {
+          throw new Error("Google did not return a valid identity token.");
+        }
+        const ticket = await client.verifyIdToken({
+          idToken: tokens.id_token,
+          audience: authConfig.googleClientId,
+        });
+        const identity = ticket.getPayload();
+        if (
+          !identity?.sub ||
+          !identity.email ||
+          identity.email_verified !== true
+        ) {
+          throw new Error("Google account has no verified email identity.");
+        }
+        const account = await signInWithGoogle(
+          identity.sub,
+          identity.email,
+          authConfig.bootstrapEmail
+        );
+        const sessionToken = createSessionToken(
+          account.id,
+          account.sessionVersion,
+          authConfig.secret
+        );
+        const sessionCookie = createSessionCookie(sessionToken, secure);
+        return reply
+          .header("Set-Cookie", [clearState, sessionCookie])
+          .redirect(new URL("/", authConfig.publicAppUrl).toString(), 303);
+      } catch (error) {
+        fastify.log.error(
+          { errorType: error instanceof Error ? error.name : "UnknownError" },
+          "Google sign-in failed"
+        );
+        return reply
+          .header("Set-Cookie", clearState)
+          .redirect(loginErrorUrl(authConfig, "google_auth_failed"));
+      }
     },
   });
 
-  fastify.get("/auth/session", async (req, reply) => {
-    if (!authConfig) {
-      return reply.send({ authenticated: true, authenticationEnabled: false });
-    }
-
-    const token = getSessionCookie(req.headers.cookie);
-    if (!verifySessionToken(token, authConfig)) {
+  fastify.get("/auth/session", async (request, reply) => {
+    if (!request.authUserId || !request.authEmail) {
       return reply.status(401).send({ authenticated: false });
     }
     return reply.send({
       authenticated: true,
       authenticationEnabled: true,
-      email: authConfig.email,
+      user: { id: request.authUserId, email: request.authEmail },
     });
   });
 
-  fastify.post("/auth/logout", async (_req, reply) => {
+  fastify.post("/auth/logout", async (_request, reply) => {
     const secure = process.env["NODE_ENV"] === "production";
     return reply
       .header("Set-Cookie", clearSessionCookie(secure))

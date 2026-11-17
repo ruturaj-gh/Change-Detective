@@ -2,10 +2,10 @@
 
 > **Browser-based storage history** — understand what changed on your computer, starting with disk/storage growth.
 
-The dashboard is a web app. Local development can run the API, scanner, and PostgreSQL on Linux or Windows. The hosted direction is a single-user dashboard with sign-in and a Linux agent that connects outbound to report scans.
+The dashboard is a web app. Local development can run the API, scanner, and PostgreSQL on Linux or Windows. A separately installed Node.js agent connects outbound to report scans from Windows, macOS, or Linux. Android support is best-effort through Termux; this is not a native Android app.
 
 > [!NOTE]
-> **Current status:** Linux/Windows local scanning, single-user authentication, and an outbound Linux agent protocol are implemented. The agent flow still needs validation against a live database and HTTPS deployment. Do not expose the service publicly until you have completed those checks and configured an HTTPS reverse proxy.
+> **Current status:** Per-account data isolation, Google OAuth sign-in, per-account devices and settings, account deletion, and an outbound multi-platform agent protocol are implemented. Windows, macOS, and Linux agent deployments still need validation on their target platforms; Android is best-effort through Termux. The hosted flow still needs validation with production Google OAuth, a live database, HTTPS, and independent accounts. Do not expose the service publicly until those checks and production deployment controls are complete.
 
 ---
 
@@ -35,19 +35,35 @@ cp .env.example .env
 # DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@127.0.0.1:5432/change_detective
 ```
 
-For local development, sign-in is disabled unless authentication variables are set.
-Production mode fails to start unless `AUTH_EMAIL`, `AUTH_PASSWORD_HASH`, and
-`AUTH_SECRET` are configured. Generate the password hash interactively (input is
-not echoed) with:
+Accounts use Google OAuth. In Google Cloud Console, configure the OAuth consent
+screen and create an OAuth client ID for a web application. While the consent
+screen is in testing mode, add your Google account as a test user. Add this
+authorized redirect URI:
 
-```bash
-npm run auth:hash-password --workspace @change-detective/api
-openssl rand -hex 32
+```text
+http://localhost:3000/api/auth/google/callback
 ```
 
-Copy the hash and a newly generated secret into the server's environment. A
-production deployment must use HTTPS and keep the API behind the web app or a
-trusted private network; do not expose the API port directly.
+Set the client values in the repository-root `.env`:
+
+```dotenv
+PUBLIC_APP_URL=http://localhost:3000
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
+AUTH_SECRET=<at-least-32-random-bytes>
+```
+
+Generate `AUTH_SECRET` with `openssl rand -hex 32`. For production, set
+`PUBLIC_APP_URL` to the HTTPS dashboard origin and add
+`https://your-dashboard.example/api/auth/google/callback` as an authorized
+redirect URI in Google Cloud Console. If existing legacy device data should be
+assigned to a particular Google account, set `BOOTSTRAP_EMAIL` to that account
+before its first sign-in. New accounts are created on first Google sign-in.
+The app does not receive or store Google passwords and does not send account
+emails. Existing email/password accounts are linked to Google when signing in
+with the same verified email address. Back up the database before migrating:
+the Google OAuth migration removes the obsolete password-hash column and email
+action-token table.
 
 ### 3. Create the database
 
@@ -62,6 +78,9 @@ CREATE DATABASE change_detective;
 npm run db:migrate --workspace @change-detective/api
 npm run db:seed --workspace @change-detective/api
 ```
+
+The Prisma workspace commands load `DATABASE_URL` from the repository-root
+`.env` file, matching the API and seed scripts.
 
 ### 5. Start the API and dashboard
 
@@ -80,39 +99,51 @@ curl http://127.0.0.1:3001/api/health
 # Then open http://localhost:3000 in your browser.
 ```
 
-## Hosted Linux agent (early implementation)
+## Accounts and remote scanning agents
+
+Each account has isolated devices, scan history, findings, and settings. Users
+can enroll multiple devices from Settings. Device records are tied to the
+account that generated the one-time enrollment token; agent tokens are stored
+as hashes. The service does not use MAC addresses for identity.
 
 The agent polls the API over HTTPS for scan requests and uploads directory-level
 measurements. It does not open an inbound port. It only scans the absolute root
 configured in its local agent file; a different root received from the server is
 refused. Agent credentials are saved under
-`$XDG_CONFIG_HOME/change-detective/agent.json` (or `~/.config/...`) with
-directory/file permissions `0700`/`0600`.
+`$XDG_CONFIG_HOME/change-detective/agent.json` (or `~/.config/...`) on
+Linux/macOS/Termux, with directory/file permissions `0700`/`0600`. Windows
+stores it under `%APPDATA%\change-detective\agent.json` and relies on the
+current user's inherited Windows ACLs.
 
 For a hosted setup:
 
 1. Apply migrations and configure the API with `SCAN_MODE=agent`, production
-   authentication variables, and PostgreSQL. Keep the API private behind the
+   authentication/email variables, and PostgreSQL. Keep the API private behind the
    web application/reverse proxy; expose only the HTTPS web endpoint.
 2. Sign in, open **Settings**, and create a one-time enrollment token.
-3. On the Linux computer, clone/install this project, paste the token at the
-   hidden prompt shown in Settings, and run
-   `npm run agent:start --workspace @change-detective/agent`. The enrollment
-   token expires after 15 minutes and is single-use.
-4. Keep the Linux agent process running. Dashboard scans are queued for it;
+3. Each user signs in to their own account. On a scanning computer, install Node.js 20+, clone/install this project,
+   select the matching Bash or PowerShell setup snippet in Settings, and enter
+   the token at its hidden prompt. The enrollment token expires after 15 minutes
+   and is single-use. Android users need Termux with Node.js and must run
+   `termux-setup-storage` before choosing an accessible monitored directory.
+4. Keep the agent process running. Dashboard scans are queued for it;
    it polls every 30 seconds and renews long-running task leases.
 5. To revoke access, use **Revoke access** in Settings. Existing snapshots are
    retained, while queued/running scans are failed.
 
 The agent is currently started in a foreground terminal; a systemd service,
 installer, deployment automation, and live database/reverse-proxy validation
-are still future work. If changing the monitored root, update the local agent
-configuration file as well. After revoking an agent, remove its saved local
-credential before enrolling it again:
+are still future work. Android/Termux and other Node.js platforms are best-effort
+and depend on filesystem API and permission support. If changing the monitored
+root, update the local agent configuration file as well. After revoking an
+agent, remove its saved local credential before enrolling it again:
 
 ```bash
 rm -- "${XDG_CONFIG_HOME:-$HOME/.config}/change-detective/agent.json"
 ```
+
+On Windows, remove `%APPDATA%\change-detective\agent.json` from the scanning
+user's profile.
 
 Never put the enrollment token or agent bearer token in a command-line
 argument, source control, or logs.
@@ -159,7 +190,7 @@ change-detective/
 │   │   │   ├── config/       Device ID management
 │   │   │   └── db/           Prisma client + seed
 │   │   └── prisma/           schema.prisma + migrations
-│   ├── agent/        Linux agent that polls the API and uploads scan results
+│   ├── agent/        Cross-platform Node.js agent that polls and uploads results
 │   │   └── src/
 │   └── web/          Next.js browser dashboard (port 3000)
 ├── packages/
@@ -195,7 +226,12 @@ change-detective/
 | `DATABASE_URL` | — | PostgreSQL connection string |
 | `API_HOST` | `127.0.0.1` | Bind address (do not change to `0.0.0.0` — see security notes) |
 | `API_PORT` | `3001` | API port |
-| `NODE_ENV` | `development` | `development` or `production` |
+| `NODE_ENV` | `development` | `development` or `production`; production requires HTTPS, Google OAuth credentials, and `AUTH_SECRET` |
+| `SCAN_MODE` | `local` | `local` scans on the API host; `agent` queues scans for each user's enrolled agent |
+| `PUBLIC_APP_URL` | `http://localhost:3000` | Dashboard origin and Google OAuth callback base; HTTPS is required in production |
+| `AUTH_SECRET` | generated per development process | Session-signing secret; set a persistent value of at least 32 bytes in production |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | — | OAuth web application credentials from Google Cloud Console |
+| `BOOTSTRAP_EMAIL` | — | Optional Google account email allowed to claim existing legacy data |
 
 ---
 
@@ -203,8 +239,10 @@ change-detective/
 
 - The API binds to `127.0.0.1` (localhost only) by default. **Do not expose it to the network.**
 - Database credentials stay in `.env` — never commit `.env`.
-- The hosted dashboard requires sign-in; local development authentication is disabled by default.
-- The Linux agent sends measurements only to its enrolled service over HTTPS.
+- The dashboard requires Google sign-in. Keep OAuth client secrets and `AUTH_SECRET` out of source control.
+- The agent sends measurements only to its enrolled service over HTTPS.
+- User data is scoped by account. Configure Google OAuth and HTTPS before deploying the portal publicly.
+- Scan and finding history is automatically cleaned according to each account's configured retention period.
 - The scanner never reads file contents or computes hashes.
 - No files are deleted or modified by this tool.
 
@@ -226,14 +264,10 @@ pg_restore -U postgres -d change_detective change_detective_backup.dump
 
 ### History cleanup
 
-History retention is configurable (1–3650 days) via `PATCH /api/settings`.  
-Retention cleanup is **not** automatic in the MVP — run it manually if needed:
-
-```sql
--- Delete scans older than N days (replace 90 with your retention days):
-DELETE FROM scans WHERE started_at < NOW() - INTERVAL '90 days'
-  AND id NOT IN (SELECT scan_id FROM findings WHERE resolved_at IS NULL);
-```
+History retention is configurable (1–3650 days) per account. The scheduler
+periodically deletes expired scans, directory snapshots, and findings. Keep
+database backups under an appropriate retention policy as well; cleanup does
+not remove already-created backups.
 
 ---
 
@@ -243,7 +277,7 @@ DELETE FROM scans WHERE started_at < NOW() - INTERVAL '90 days'
 - **Logical file size:** Reports `stat.size` (logical bytes), not allocated disk blocks. Drive totals will differ from OS-reported used space due to filesystem overhead, sparse files, and protected paths.
 - **Scheduled scans:** Only run while the API process is alive. If the process stops, scheduled scans do not occur (by design).
 - **First scan = baseline:** No change detection until a second scan completes against the same root.
-- **Single device:** The MVP manages one local device. The schema supports multiple devices for future expansion.
+- **Android scanning:** Android requires a separately installed Termux agent and explicit storage permission; using the dashboard in an Android browser alone does not scan phone storage.
 
 ---
 
@@ -269,5 +303,5 @@ DELETE FROM scans WHERE started_at < NOW() - INTERVAL '90 days'
 | Scanner | Node.js `fs/promises` | Linux and Windows paths |
 | Validation | Zod | API input + settings |
 | Tests | Vitest | All packages |
-| Frontend | Next.js (planned) | Phase 4 |
+| Frontend | Next.js 14 | Responsive dashboard and account portal |
 

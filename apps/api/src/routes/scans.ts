@@ -17,6 +17,7 @@ import {
   InvalidScanComparisonError,
   NoEnrolledAgentError,
 } from "../services/scan.service.js";
+import { getSessionUserId } from "./session-user.js";
 
 const PaginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -26,13 +27,23 @@ const PaginationSchema = z.object({
 const ComparisonQuerySchema = z.object({
   previousScanId: z.string().uuid().optional(),
 });
+const StartScanSchema = z
+  .object({ deviceId: z.string().uuid().optional() })
+  .optional();
 
 export const scanRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /api/scans
-  fastify.post("/scans", async (_req, reply) => {
+  fastify.post("/scans", async (req, reply) => {
+    const userId = getSessionUserId(req, reply);
+    if (!userId) return;
+    const body = StartScanSchema.safeParse(req.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: "INVALID_SCAN_REQUEST" });
+    }
+
     let result;
     try {
-      result = await startScan("manual");
+      result = await startScan(userId, "manual", body.data?.deviceId);
     } catch (error) {
       if (error instanceof NoEnrolledAgentError) {
         return reply.status(503).send({
@@ -59,17 +70,25 @@ export const scanRoutes: FastifyPluginAsync = async (fastify) => {
 
   // GET /api/scans
   fastify.get("/scans", async (req, reply) => {
+    const userId = getSessionUserId(req, reply);
+    if (!userId) return;
     const query = PaginationSchema.safeParse(req.query);
     if (!query.success) {
       return reply.status(400).send({ error: "INVALID_QUERY", details: query.error.flatten() });
     }
-    const scans = await listScans(query.data.limit, query.data.offset);
+    const scans = await listScans(
+      userId,
+      query.data.limit,
+      query.data.offset
+    );
     return reply.send({ scans });
   });
 
   // GET /api/scans/:id
   fastify.get<{ Params: { id: string } }>("/scans/:id", async (req, reply) => {
-    const scan = await getScanById(req.params.id);
+    const userId = getSessionUserId(req, reply);
+    if (!userId) return;
+    const scan = await getScanById(req.params.id, userId);
     if (!scan) {
       return reply.status(404).send({ error: "NOT_FOUND", message: "Scan not found." });
     }
@@ -80,11 +99,13 @@ export const scanRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>(
     "/scans/:id/directories",
     async (req, reply) => {
-      const scan = await getScanById(req.params.id);
+      const userId = getSessionUserId(req, reply);
+      if (!userId) return;
+      const scan = await getScanById(req.params.id, userId);
       if (!scan) {
         return reply.status(404).send({ error: "NOT_FOUND", message: "Scan not found." });
       }
-      const directories = await getScanDirectories(req.params.id);
+      const directories = await getScanDirectories(req.params.id, userId);
       return reply.send({ directories });
     }
   );
@@ -93,6 +114,8 @@ export const scanRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { id: string } }>(
     "/scans/:id/changes",
     async (req, reply) => {
+      const userId = getSessionUserId(req, reply);
+      if (!userId) return;
       const query = ComparisonQuerySchema.safeParse(req.query);
       if (!query.success) {
         return reply.status(400).send({ error: "INVALID_QUERY", details: query.error.flatten() });
@@ -100,7 +123,11 @@ export const scanRoutes: FastifyPluginAsync = async (fastify) => {
 
       let result;
       try {
-        result = await getScanChanges(req.params.id, query.data.previousScanId);
+        result = await getScanChanges(
+          req.params.id,
+          userId,
+          query.data.previousScanId
+        );
       } catch (err) {
         if (err instanceof InvalidScanComparisonError) {
           return reply.status(422).send({ error: "INCOMPARABLE_SCANS", message: err.message });

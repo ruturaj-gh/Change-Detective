@@ -33,7 +33,7 @@ export default function FindingsPage() {
     }
   }
 
-  return <div className="p-6 space-y-5 max-w-[1000px]">
+  return <div className="max-w-[1000px] space-y-5 p-4 sm:p-6">
     <header><p className="text-[10px] uppercase tracking-widest text-gray-500 mb-1">Evidence</p><h1 className="text-2xl font-semibold">Findings</h1><p className="text-sm text-gray-400 mt-1">Warnings are generated from measured values and documented rules.</p></header>
     {loading ? <p className="text-sm text-gray-500 py-8 text-center">Loading findings…</p> : error ? <div role="alert" className="rounded border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Could not load findings. Check the local API and database. {error}</div> : findings.length === 0 ? <div className="rounded-lg border border-border bg-bg-card p-8 text-center"><p className="text-white">No findings recorded</p><p className="text-sm text-gray-400 mt-1">Warnings will appear here when a scan measures a configured threshold or incomplete coverage.</p></div> : <div className="space-y-3">{findings.map((finding) => {
       const scan = finding.scan;

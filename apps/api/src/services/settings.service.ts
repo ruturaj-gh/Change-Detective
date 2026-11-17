@@ -1,5 +1,5 @@
 /**
- * Settings service — get and update the single local settings row.
+ * Settings service — get and update account-specific settings.
  */
 import { prisma } from "../db/client.js";
 import { z } from "zod";
@@ -18,16 +18,23 @@ export type SettingsPatch = z.infer<typeof SettingsPatchSchema>;
 
 export class InvalidMonitoredRootError extends Error {}
 
-export async function getSettings() {
-  return prisma.settings.findUniqueOrThrow({ where: { id: 1 } });
+export async function getSettings(userId: string) {
+  return prisma.settings.findUniqueOrThrow({ where: { userId } });
 }
 
-export async function updateSettings(patch: SettingsPatch) {
+export async function updateSettings(userId: string, patch: SettingsPatch) {
   if (patch.monitoredRoot !== undefined) {
-    if (!path.isAbsolute(patch.monitoredRoot)) {
+    const agentMode = process.env["SCAN_MODE"] === "agent";
+    const absolute =
+      path.isAbsolute(patch.monitoredRoot) ||
+      (agentMode &&
+        path.win32.isAbsolute(patch.monitoredRoot) &&
+        (/^[A-Za-z]:[\\/]/.test(patch.monitoredRoot) ||
+          patch.monitoredRoot.startsWith("\\\\")));
+    if (!absolute) {
       throw new InvalidMonitoredRootError("The monitored root must be an absolute path for this operating system.");
     }
-    if (process.env["SCAN_MODE"] !== "agent") {
+    if (!agentMode) {
       let rootStat;
       try {
         rootStat = await stat(patch.monitoredRoot);
@@ -42,7 +49,7 @@ export async function updateSettings(patch: SettingsPatch) {
 
   return prisma.$transaction(async (tx) => {
     const updated = await tx.settings.update({
-      where: { id: 1 },
+      where: { userId },
       data: {
         ...(patch.monitoredRoot !== undefined && {
           monitoredRoot: normalizePath(patch.monitoredRoot),
@@ -59,27 +66,10 @@ export async function updateSettings(patch: SettingsPatch) {
         updatedAt: new Date(),
       },
     });
-
-    if (
-      process.env["SCAN_MODE"] === "agent" &&
-      patch.monitoredRoot !== undefined
-    ) {
+    if (patch.monitoredRoot !== undefined && process.env["SCAN_MODE"] !== "agent") {
       await tx.device.updateMany({
-        where: { agentTokenHash: { not: null } },
+        where: { userId, agentTokenHash: null },
         data: { monitoredRoot: updated.monitoredRoot },
-      });
-      await tx.scan.updateMany({
-        where: {
-          device: { is: { agentTokenHash: { not: null } } },
-          status: { in: ["queued", "running"] },
-        },
-        data: {
-          status: "failed",
-          completedAt: new Date(),
-          agentLeaseUntil: null,
-          errorMessage:
-            "The monitored root changed before this scan completed.",
-        },
       });
     }
     return updated;

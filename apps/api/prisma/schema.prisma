@@ -18,8 +18,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id              String   @id @default(uuid()) @db.Uuid
+  email           String   @unique
+  googleSubject   String?  @unique @map("google_subject")
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz
+  privacyNoticeVersion String? @map("privacy_notice_version")
+  privacyAcceptedAt DateTime? @map("privacy_accepted_at") @db.Timestamptz
+  sessionVersion  Int      @default(0) @map("session_version")
+  isLegacy        Boolean  @default(false) @map("is_legacy")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  devices          Device[]
+  settings         Settings?
+  agentEnrollments AgentEnrollment[]
+
+  @@map("users")
+}
+
 model Device {
   id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   name            String
   osName          String    @default("Windows") @map("os_name")
   monitoredRoot   String?   @map("monitored_root")
@@ -30,11 +51,14 @@ model Device {
   scans    Scan[]
   findings Finding[]
 
+  @@index([userId, createdAt], name: "devices_user_created_idx")
   @@map("devices")
 }
 
 model AgentEnrollment {
   id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   tokenHash String   @unique @map("token_hash")
   expiresAt DateTime @map("expires_at") @db.Timestamptz
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
@@ -44,10 +68,9 @@ model AgentEnrollment {
 }
 
 model Settings {
-  // id=1 enforced by a CHECK constraint added in the migration SQL.
-  // Prisma does not support partial CHECK constraints natively, so we
-  // add it via a raw migration step.
-  id                       Int      @id @default(1)
+  id                       Int      @id @default(autoincrement())
+  userId                   String   @unique @map("user_id") @db.Uuid
+  user                     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   monitoredRoot            String   @default("C:\\") @map("monitored_root")
   scanIntervalMinutes      Int      @default(360) @map("scan_interval_minutes")
   lowSpaceThresholdPercent Decimal  @default(10) @map("low_space_threshold_percent") @db.Decimal(5, 2)
@@ -59,7 +82,7 @@ model Settings {
 
 model Scan {
   id                        String    @id @default(uuid()) @db.Uuid
-  device                    Device    @relation(fields: [deviceId], references: [id])
+  device                    Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   deviceId                  String    @map("device_id") @db.Uuid
   rootPath                  String    @map("root_path")
   triggerType               String    @map("trigger_type") // "manual" | "scheduled"
@@ -98,7 +121,7 @@ model DirectorySnapshot {
 
 model Finding {
   id          String    @id @default(uuid()) @db.Uuid
-  device      Device    @relation(fields: [deviceId], references: [id])
+  device      Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   deviceId    String    @map("device_id") @db.Uuid
   scan        Scan?     @relation(fields: [scanId], references: [id], onDelete: SetNull)
   scanId      String?   @map("scan_id") @db.Uuid

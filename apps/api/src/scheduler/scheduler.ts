@@ -8,10 +8,12 @@
  * - Documented: scheduled scans only occur while this process is running.
  */
 import { startScan } from "../services/scan.service.js";
-import { getSettings } from "../services/settings.service.js";
+import { prisma } from "../db/client.js";
 
 let schedulerTimer: ReturnType<typeof setTimeout> | null = null;
 let stopped = false;
+const lastScheduledAt = new Map<string, number>();
+let lastRetentionCleanupAt = 0;
 
 /**
  * Start the scheduler loop.
@@ -38,32 +40,75 @@ export function stopScheduler(): void {
 async function scheduleNextTick(): Promise<void> {
   if (stopped) return;
 
-  let intervalMs: number;
   try {
-    const settings = await getSettings();
-    intervalMs = settings.scanIntervalMinutes * 60 * 1000;
-  } catch (err) {
-    console.error("[scheduler] Failed to read settings, retrying in 1 minute:", err);
-    intervalMs = 60 * 1000;
-  }
-
-  schedulerTimer = setTimeout(async () => {
-    if (stopped) return;
-
-    console.log("[scheduler] Triggering scheduled scan.");
-    try {
-      const result = await startScan("scheduled");
-      if (result.status === "already_running") {
-        console.log(`[scheduler] Scan already running (id: ${result.existingScanId}), skipping.`);
-      } else {
-        console.log(`[scheduler] Scan started (id: ${result.scanId}).`);
+    const settings = await prisma.settings.findMany({
+      select: {
+        userId: true,
+        scanIntervalMinutes: true,
+        historyRetentionDays: true,
+        user: { select: { devices: { select: { id: true, agentTokenHash: true } } } },
+      },
+    });
+    const now = Date.now();
+    if (now - lastRetentionCleanupAt >= 6 * 60 * 60 * 1000) {
+      for (const accountSettings of settings) {
+        const deviceIds = accountSettings.user.devices.map((device) => device.id);
+        if (deviceIds.length === 0) continue;
+        const cutoff = new Date(
+          now - accountSettings.historyRetentionDays * 24 * 60 * 60 * 1000
+        );
+        await prisma.$transaction([
+          prisma.finding.deleteMany({
+            where: { deviceId: { in: deviceIds }, createdAt: { lt: cutoff } },
+          }),
+          prisma.scan.deleteMany({
+            where: {
+              deviceId: { in: deviceIds },
+              completedAt: { lt: cutoff },
+            },
+          }),
+        ]);
       }
-    } catch (err) {
-      console.error("[scheduler] Failed to start scheduled scan:", err);
+      lastRetentionCleanupAt = now;
     }
 
-    // Schedule next tick.
-    scheduleNextTick();
-  }, intervalMs);
+    for (const accountSettings of settings) {
+      const intervalMs = accountSettings.scanIntervalMinutes * 60 * 1000;
+      const previousTick = lastScheduledAt.get(accountSettings.userId) ?? now;
+      if (now - previousTick < intervalMs) continue;
+
+      const devices = accountSettings.user.devices.filter((device) =>
+        process.env["SCAN_MODE"] === "agent"
+          ? device.agentTokenHash !== null
+          : device.agentTokenHash === null
+      );
+      for (const device of devices) {
+        try {
+          const result = await startScan(
+            accountSettings.userId,
+            "scheduled",
+            device.id
+          );
+          if (result.status === "already_running") {
+            console.log(
+              `[scheduler] Account ${accountSettings.userId} already has scan ${result.existingScanId}; skipping device ${device.id}.`
+            );
+          }
+        } catch (error) {
+          console.error(
+            `[scheduler] Failed to schedule scan for device ${device.id}:`,
+            error
+          );
+        }
+      }
+      lastScheduledAt.set(accountSettings.userId, now);
+    }
+  } catch (err) {
+    console.error("[scheduler] Failed to schedule account scans:", err);
+  }
+
+  if (!stopped) {
+    schedulerTimer = setTimeout(() => void scheduleNextTick(), 60 * 1000);
+  }
 }
 

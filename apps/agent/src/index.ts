@@ -26,10 +26,12 @@ const TaskSchema = z.object({
 type AgentConfig = z.infer<typeof AgentConfigSchema>;
 type ScanTask = NonNullable<z.infer<typeof TaskSchema>["task"]>;
 
-const CONFIG_DIR = join(
-  process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"),
-  "change-detective"
-);
+const CONFIG_BASE_DIR =
+  process.env["XDG_CONFIG_HOME"] ??
+  (process.platform === "win32"
+    ? process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming")
+    : join(homedir(), ".config"));
+const CONFIG_DIR = join(CONFIG_BASE_DIR, "change-detective");
 const CONFIG_FILE = join(CONFIG_DIR, "agent.json");
 
 class AgentAuthenticationError extends Error {}
@@ -60,9 +62,9 @@ async function loadConfig(): Promise<AgentConfig> {
     const raw = await readFile(CONFIG_FILE, "utf8");
     const config = AgentConfigSchema.parse(JSON.parse(raw));
     if (!isAbsolute(config.monitoredRoot)) {
-      throw new Error("Saved monitored root is not an absolute Linux path.");
+      throw new Error("Saved monitored root is not an absolute path for this operating system.");
     }
-    await chmod(CONFIG_FILE, 0o600);
+    if (process.platform !== "win32") await chmod(CONFIG_FILE, 0o600);
     return { ...config, apiUrl: normalizeApiUrl(config.apiUrl) };
   } catch (error) {
     if (
@@ -85,7 +87,7 @@ async function loadConfig(): Promise<AgentConfig> {
     throw new Error("The enrollment token has an invalid format.");
   }
   if (!isAbsolute(rootValue)) {
-    throw new Error("CD_MONITORED_ROOT must be an absolute Linux path.");
+    throw new Error("CD_MONITORED_ROOT must be an absolute path for this operating system.");
   }
 
   const monitoredRoot = normalizePath(rootValue);
@@ -103,7 +105,7 @@ async function loadConfig(): Promise<AgentConfig> {
       body: {
         enrollmentToken,
         name: hostname(),
-        osName: "Linux",
+        osName: getAgentOsName(),
         monitoredRoot,
       },
     }
@@ -123,13 +125,25 @@ async function loadConfig(): Promise<AgentConfig> {
   });
   await saveConfig(config);
   delete process.env["CD_ENROLLMENT_TOKEN"];
-  console.log(`Enrolled this Linux device (${config.deviceId}).`);
+  console.log(`Enrolled this ${getAgentOsName()} device (${config.deviceId}).`);
   return config;
+}
+
+function getAgentOsName(): string {
+  if (
+    process.platform === "android" ||
+    process.env["PREFIX"]?.includes("com.termux")
+  ) {
+    return "Android (Termux)";
+  }
+  if (process.platform === "win32") return "Windows";
+  if (process.platform === "darwin") return "macOS";
+  return process.platform.charAt(0).toUpperCase() + process.platform.slice(1);
 }
 
 async function saveConfig(config: AgentConfig): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  await chmod(CONFIG_DIR, 0o700);
+  if (process.platform !== "win32") await chmod(CONFIG_DIR, 0o700);
   const temporary = `${CONFIG_FILE}.${randomUUID()}.tmp`;
   await writeFile(temporary, JSON.stringify(config, null, 2), {
     encoding: "utf8",
@@ -138,7 +152,7 @@ async function saveConfig(config: AgentConfig): Promise<void> {
   });
   try {
     await rename(temporary, CONFIG_FILE);
-    await chmod(CONFIG_FILE, 0o600);
+    if (process.platform !== "win32") await chmod(CONFIG_FILE, 0o600);
   } catch (error) {
     const { rm } = await import("node:fs/promises");
     await rm(temporary, { force: true });
@@ -277,12 +291,10 @@ async function executeTask(config: AgentConfig, task: ScanTask): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  if (process.platform !== "linux") {
-    throw new Error("The hosted scanning agent currently supports Linux only.");
-  }
-
   const config = await loadConfig();
-  console.log(`Agent ready for ${config.monitoredRoot}.`);
+  console.log(
+    `${getAgentOsName()} agent ready to scan ${config.monitoredRoot}.`
+  );
 
   process.on("SIGINT", stopAgent);
   process.on("SIGTERM", stopAgent);

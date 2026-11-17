@@ -10,6 +10,7 @@ dotenv.config({ path: "../../.env" });
 import { PrismaClient } from "@prisma/client";
 import { getOrCreateDeviceId } from "../config/device-id.js";
 import { homedir } from "node:os";
+import { LEGACY_USER_ID } from "../auth/accounts.js";
 
 const prisma = new PrismaClient();
 
@@ -25,28 +26,39 @@ async function seed() {
           ? "Linux"
           : process.platform;
 
+  await prisma.user.upsert({
+    where: { id: LEGACY_USER_ID },
+    create: {
+      id: LEGACY_USER_ID,
+      email: "legacy-owner@local.invalid",
+      isLegacy: true,
+    },
+    update: {},
+  });
+
   // Upsert the local device row.
   await prisma.device.upsert({
     where: { id: deviceId },
     create: {
       id: deviceId,
+      userId: LEGACY_USER_ID,
       name: hostname,
       osName,
       lastSeenAt: new Date(),
     },
-    update: { lastSeenAt: new Date() },
+    update: { userId: LEGACY_USER_ID, lastSeenAt: new Date() },
   });
 
-  // Upsert the settings row (id=1).
+  // Upsert the local user's settings.
   const defaultRoot = process.platform === "win32" ? "C:\\" : homedir();
   const settings = await prisma.settings.upsert({
-    where: { id: 1 },
-    create: { id: 1, monitoredRoot: defaultRoot },
+    where: { userId: LEGACY_USER_ID },
+    create: { userId: LEGACY_USER_ID, monitoredRoot: defaultRoot },
     update: {},
   });
   if (process.platform !== "win32" && settings.monitoredRoot === "C:\\") {
     await prisma.settings.update({
-      where: { id: 1 },
+      where: { userId: LEGACY_USER_ID },
       data: { monitoredRoot: defaultRoot },
     });
   }

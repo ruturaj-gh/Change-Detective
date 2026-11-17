@@ -4,6 +4,7 @@ import { prisma } from "../db/client.js";
 import { generateFindings } from "./findings.service.js";
 import type { ScanResult } from "@change-detective/scanner";
 import type { AgentScanResult } from "../schemas/agent.js";
+import { isAgentRootAbsolute } from "../schemas/agent-enrollment.js";
 
 const ENROLLMENT_TTL_MS = 15 * 60 * 1000;
 
@@ -11,20 +12,10 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export async function createAgentEnrollment(): Promise<{
+export async function createAgentEnrollment(userId: string): Promise<{
   token: string;
   expiresAt: Date;
 }> {
-  const existingAgent = await prisma.device.findFirst({
-    where: { agentTokenHash: { not: null } },
-    select: { id: true },
-  });
-  if (existingAgent) {
-    throw new AgentAlreadyEnrolledError(
-      "A Linux agent is already enrolled. Revoke it before enrolling another."
-    );
-  }
-
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + ENROLLMENT_TTL_MS);
 
@@ -32,14 +23,52 @@ export async function createAgentEnrollment(): Promise<{
     where: { expiresAt: { lte: new Date() } },
   });
   await prisma.agentEnrollment.create({
-    data: { tokenHash: hashToken(token), expiresAt },
+    data: { userId, tokenHash: hashToken(token), expiresAt },
   });
 
   return { token, expiresAt };
 }
 
 export class InvalidEnrollmentTokenError extends Error {}
-export class AgentAlreadyEnrolledError extends Error {}
+export class InvalidAgentRootError extends Error {}
+
+export async function updateAgentMonitoredRoot(
+  userId: string,
+  deviceId: string,
+  monitoredRoot: string
+): Promise<boolean> {
+  const device = await prisma.device.findFirst({
+    where: { id: deviceId, userId, agentTokenHash: { not: null } },
+    select: { osName: true },
+  });
+  if (!device) return false;
+  if (!isAgentRootAbsolute(device.osName, monitoredRoot) || monitoredRoot.includes("\0")) {
+    throw new InvalidAgentRootError(
+      "The monitored root must be an absolute path for this device's operating system."
+    );
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.device.updateMany({
+      where: { id: deviceId, userId, agentTokenHash: { not: null } },
+      data: { monitoredRoot: normalizePath(monitoredRoot.trim()) },
+    });
+    if (updated.count !== 1) return false;
+    await tx.scan.updateMany({
+      where: {
+        deviceId,
+        status: { in: ["queued", "running"] },
+      },
+      data: {
+        status: "failed",
+        completedAt: new Date(),
+        agentLeaseUntil: null,
+        errorMessage: "The monitored root changed before this scan completed.",
+      },
+    });
+    return true;
+  });
+}
 
 export async function enrollAgent(input: {
   token: string;
@@ -52,22 +81,20 @@ export async function enrollAgent(input: {
   const now = new Date();
 
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT "id" FROM "settings" WHERE "id" = 1 FOR UPDATE`;
-    const existingAgent = await tx.device.findFirst({
-      where: { agentTokenHash: { not: null } },
-      select: { id: true },
-    });
-    if (existingAgent) {
-      throw new AgentAlreadyEnrolledError(
-        "A Linux agent is already enrolled. Revoke it before enrolling another."
-      );
-    }
-
-    const claimed = await tx.agentEnrollment.deleteMany({
+    const enrollment = await tx.agentEnrollment.findFirst({
       where: {
         tokenHash: hashToken(input.token),
         expiresAt: { gt: now },
       },
+      select: { id: true, userId: true },
+    });
+    if (!enrollment) {
+      throw new InvalidEnrollmentTokenError(
+        "Enrollment token is invalid, expired, or already used."
+      );
+    }
+    const claimed = await tx.agentEnrollment.deleteMany({
+      where: { id: enrollment.id, expiresAt: { gt: now } },
     });
     if (claimed.count !== 1) {
       throw new InvalidEnrollmentTokenError(
@@ -79,6 +106,7 @@ export async function enrollAgent(input: {
     await tx.device.create({
       data: {
         id: deviceId,
+        userId: enrollment.userId,
         name: input.name,
         osName: input.osName,
         monitoredRoot,
@@ -86,19 +114,15 @@ export async function enrollAgent(input: {
         lastSeenAt: now,
       },
     });
-    await tx.settings.update({
-      where: { id: 1 },
-      data: { monitoredRoot, updatedAt: now },
-    });
   });
 
   return { deviceId, agentToken };
 }
 
-export async function revokeAgent(deviceId: string): Promise<boolean> {
+export async function revokeAgent(userId: string, deviceId: string): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
     const revoked = await tx.device.updateMany({
-      where: { id: deviceId, agentTokenHash: { not: null } },
+      where: { id: deviceId, userId, agentTokenHash: { not: null } },
       data: { agentTokenHash: null },
     });
     if (revoked.count !== 1) return false;
@@ -293,10 +317,11 @@ export async function saveAgentScanResult(
 
   if (scanResult.status === "completed" || scanResult.status === "partial") {
     const settings = await prisma.settings.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { userId: device.userId },
     });
     try {
       await generateFindings({
+        userId: device.userId,
         scanId,
         deviceId,
         rootPath: scan.rootPath,

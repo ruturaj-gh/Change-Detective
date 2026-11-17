@@ -17,6 +17,7 @@ import { getScanChanges } from "./scan.service.js";
 const SIGNIFICANT_GROWTH_BYTES = 500n * 1024n * 1024n; // 500 MiB
 
 export interface FindingsInput {
+  userId: string;
   scanId: string;
   deviceId: string;
   rootPath: string;
@@ -95,7 +96,7 @@ export async function generateFindings(input: FindingsInput): Promise<void> {
   }
 
   // --- Rule 4: Significant directory growth ---
-  const changesResult = await getScanChanges(scanId);
+  const changesResult = await getScanChanges(scanId, input.userId);
   if (changesResult && !changesResult.isBaseline && changesResult.previousScan) {
     for (const change of changesResult.changes) {
       if (
@@ -151,14 +152,11 @@ function toJson(obj: Record<string, string | number | boolean | null | undefined
 }
 
 /**
- * List findings for the local device.
+ * List findings for all devices owned by this account.
  */
-export async function listFindings(limit = 100, offset = 0) {
-  const agentMode = process.env["SCAN_MODE"] === "agent";
-  const { getOrCreateDeviceId } = await import("../config/device-id.js");
-  const deviceId = agentMode ? undefined : await getOrCreateDeviceId();
+export async function listFindings(userId: string, limit = 100, offset = 0) {
   return prisma.finding.findMany({
-    ...(deviceId ? { where: { deviceId } } : {}),
+    where: { device: { is: { userId } } },
     orderBy: { createdAt: "desc" },
     take: limit,
     skip: offset,

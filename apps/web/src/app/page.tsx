@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { ScanLine, Folder, ChevronRight, Settings as SettingsIcon } from "lucide-react";
 import Link from "next/link";
-import { api, type Scan, type Finding, type DirectorySnapshot, type DirectoryChange, type Settings } from "@/lib/api";
+import { api, type Scan, type Finding, type DirectorySnapshot, type DirectoryChange, type Settings, type Device } from "@/lib/api";
 import { StatCard } from "@/components/ui/StatCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { StorageHistoryChart } from "@/components/overview/StorageHistoryChart";
@@ -12,14 +12,24 @@ import { formatBytes, formatDate, formatDuration, formatDelta, formatPercent, us
 
 // ─── Scan-now button ──────────────────────────────────────────────────────────
 
-function ScanNowButton({ onScanStarted, onScanUpdated }: { onScanStarted: () => void; onScanUpdated: (scan: Scan) => void }) {
+function ScanNowButton({ devices, scanMode, onScanStarted, onScanUpdated }: { devices: Device[]; scanMode: "local" | "agent"; onScanStarted: () => void; onScanUpdated: (scan: Scan) => void }) {
   const [scanning, setScanning] = useState(false);
   const [scanId, setScanId] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState<Scan | null>(null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const eligibleDevices = devices.filter((device) =>
+    scanMode === "agent" ? device.isAgent : !device.isAgent
+  );
+
+  useEffect(() => {
+    if (!eligibleDevices.some((device) => device.id === selectedDeviceId)) {
+      setSelectedDeviceId(eligibleDevices[0]?.id ?? "");
+    }
+  }, [eligibleDevices, selectedDeviceId]);
 
   const startScan = useCallback(async () => {
     try {
-      const res = await api.scans.start();
+      const res = await api.scans.start(selectedDeviceId || undefined);
       setScanId(res.scanId);
       setScanning(true);
       setScanStatus(null);
@@ -27,7 +37,7 @@ function ScanNowButton({ onScanStarted, onScanUpdated }: { onScanStarted: () => 
     } catch (e) {
       alert((e as Error).message);
     }
-  }, [onScanStarted]);
+  }, [onScanStarted, selectedDeviceId]);
 
   // Poll while scanning
   useEffect(() => {
@@ -67,13 +77,29 @@ function ScanNowButton({ onScanStarted, onScanUpdated }: { onScanStarted: () => 
   }
 
   return (
-    <button
-      onClick={() => void startScan()}
-      className="flex items-center gap-2 bg-accent hover:bg-accent/80 text-black text-sm px-4 py-2 rounded-lg font-semibold transition-colors"
-    >
-      <ScanLine size={14} />
-      Scan now
-    </button>
+    <div className="flex flex-col gap-2 sm:flex-row">
+      {eligibleDevices.length > 1 && (
+        <select
+          aria-label="Scanning device"
+          value={selectedDeviceId}
+          onChange={(event) => setSelectedDeviceId(event.target.value)}
+          className="rounded border border-border bg-bg-card px-3 py-2 text-xs text-white"
+        >
+          {eligibleDevices.map((device) => (
+            <option key={device.id} value={device.id}>{device.name} · {device.osName}</option>
+          ))}
+        </select>
+      )}
+      <button
+        onClick={() => void startScan()}
+        disabled={!eligibleDevices.length}
+        title={!eligibleDevices.length ? "Add a scanning device in Settings first." : undefined}
+        className="flex items-center gap-2 bg-accent hover:bg-accent/80 text-black text-sm px-4 py-2 rounded-lg font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <ScanLine size={14} />
+        {eligibleDevices.length ? "Scan now" : "Add a device in Settings"}
+      </button>
+    </div>
   );
 }
 
@@ -106,21 +132,26 @@ export default function OverviewPage() {
   const [changes, setChanges] = useState<DirectoryChange[]>([]);
   const [hasComparableBaseline, setHasComparableBaseline] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [scanMode, setScanMode] = useState<"local" | "agent">("local");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
   const loadData = useCallback(async () => {
     setLoadError("");
     try {
-      const [scansRes, findingsRes, settingsRes] = await Promise.all([
+      const [scansRes, findingsRes, settingsRes, devicesRes] = await Promise.all([
         api.scans.list(),
         api.findings.list(),
         api.settings.get(),
+        api.devices(),
       ]);
 
       setScans(scansRes.scans);
       setFindings(findingsRes.findings);
       setSettings(settingsRes.settings);
+      setDevices(devicesRes.devices);
+      setScanMode(devicesRes.scanMode);
 
       const latest = scansRes.scans[0] ?? null;
       setLatestScan(latest);
@@ -218,9 +249,9 @@ export default function OverviewPage() {
   }
 
   return (
-    <div className="p-6 space-y-6 max-w-[1200px]">
+    <div className="max-w-[1200px] space-y-6 p-4 sm:p-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <p className="text-[10px] uppercase tracking-widest text-gray-500 mb-1">System Overview</p>
           <h1 className="text-2xl font-semibold text-white">{greeting}</h1>
@@ -234,7 +265,7 @@ export default function OverviewPage() {
                   : "No scans yet — run your first scan to get started."}
           </p>
         </div>
-        <ScanNowButton onScanStarted={refreshOverview} onScanUpdated={updateScanStatus} />
+        <ScanNowButton devices={devices} scanMode={scanMode} onScanStarted={refreshOverview} onScanUpdated={updateScanStatus} />
       </div>
 
       {loadError && <div role="alert" className="rounded border border-danger/30 bg-danger/5 p-3 text-sm text-danger">The local API or database could not be reached. Start the API and check its database connection, then refresh. {loadError}</div>}
@@ -244,7 +275,7 @@ export default function OverviewPage() {
       {latestScan && <ScanProgressBar scan={latestScan} />}
 
       {/* Stat cards */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Drive capacity"
           value={totalDisk}
@@ -281,8 +312,8 @@ export default function OverviewPage() {
       </div>
 
       {/* Charts row */}
-      <div className="grid grid-cols-5 gap-4">
-        <div className="col-span-3 bg-bg-card border border-border rounded-lg p-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+        <div className="rounded-lg border border-border bg-bg-card p-4 lg:col-span-3">
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs font-semibold text-white">Storage history</span>
             <div className="flex items-center gap-3 text-[10px] text-gray-500">
@@ -293,7 +324,7 @@ export default function OverviewPage() {
           <StorageHistoryChart data={chartData} />
         </div>
 
-        <div className="col-span-2 bg-bg-card border border-border rounded-lg p-4">
+        <div className="rounded-lg border border-border bg-bg-card p-4 lg:col-span-2">
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs font-semibold text-white">Scan coverage</span>
             {latestSnapshotScan && (
@@ -315,7 +346,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Largest dirs + Recent findings */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Largest directories */}
         <div className="bg-bg-card border border-border rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
