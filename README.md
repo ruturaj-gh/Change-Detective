@@ -11,6 +11,110 @@ The dashboard is a web app. Local development can run the API, scanner, and Post
 
 ## Quick start
 
+### Run the whole app with Docker Compose
+
+Docker Compose runs the dashboard, API, and PostgreSQL. The database is kept
+in a named volume, so it survives container restarts and rebuilds.
+
+Prerequisite: Docker Engine with the Compose plugin (`docker compose`).
+
+```bash
+cp .env.example .env
+```
+
+In the root `.env`, set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and a
+persistent `AUTH_SECRET` (`openssl rand -hex 32`). Set `POSTGRES_PASSWORD` to a
+URL-safe value (for example, `openssl rand -hex 24`). For local use, keep
+`NODE_ENV=development` and `PUBLIC_APP_URL=http://localhost:3000`. Add
+`http://localhost:3000/api/auth/google/callback` to the Google OAuth client's
+authorized redirect URIs.
+
+For a deployed HTTPS host, set `NODE_ENV=production` and set
+`PUBLIC_APP_URL` to that host's HTTPS origin. Production startup requires
+Google OAuth credentials and a persistent `AUTH_SECRET`.
+
+Start the services:
+
+```bash
+docker compose up --build -d
+docker compose ps
+docker compose logs -f api web
+```
+
+Open `http://localhost:3000`. The API applies pending Prisma migrations before
+starting. Back up existing data before the first start if upgrading an
+existing database. To rebuild after pulling or changing source:
+
+```bash
+docker compose up --build -d
+```
+
+Stop the containers but keep database data with `docker compose down`. **Do not
+run `docker compose down -v` unless you intend to permanently delete the
+PostgreSQL data volume.**
+
+The Compose PostgreSQL volume persists across Codespace restarts/rebuilds, but
+is deleted if you delete the Codespace. Use a managed PostgreSQL database for
+data you need to keep independently of the Codespace.
+
+#### Use a managed cloud PostgreSQL database
+
+Create a database with a PostgreSQL provider and copy its direct connection
+string (with SSL enabled, if required by the provider). Put it in the root
+`.env` as `COMPOSE_DATABASE_URL`, then start the app without the bundled
+PostgreSQL service:
+
+```bash
+docker compose -f compose.cloud.yaml up --build -d
+```
+
+In Codespaces, `COMPOSE_DATABASE_URL`, `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, and `AUTH_SECRET` can be stored as Codespaces/repository
+secrets instead of in `.env`; the Compose file passes them to the API. Keep
+`PUBLIC_APP_URL` specific to the Codespace in `.env`, and add its Google OAuth
+callback URL to the OAuth client.
+
+To move data from local PostgreSQL, first create a backup from the machine that
+can access that database, then restore it to the new, empty cloud database
+before starting the cloud Compose stack:
+
+```bash
+pg_dump --format=custom --no-owner --no-acl \
+  --dbname="$LOCAL_DATABASE_URL" --file=change-detective.dump
+pg_restore --no-owner --no-acl \
+  --dbname="$COMPOSE_DATABASE_URL" change-detective.dump
+```
+
+Set `LOCAL_DATABASE_URL` and `COMPOSE_DATABASE_URL` in that terminal to the
+respective connection strings; do not commit them or the dump file. If your
+local scans belong to the legacy owner, set `BOOTSTRAP_EMAIL` to the Google
+email that should own them before its first sign-in. Back up the source database
+and restore only into a fresh target database.
+
+#### GitHub Codespaces
+
+Open the repository in a Codespace and rebuild the dev container if prompted;
+the included dev-container configuration provides Docker. Set `PUBLIC_APP_URL`
+in the root `.env` to the forwarded HTTPS URL for port
+3000, for example `https://YOUR-CODESPACE-NAME-3000.app.github.dev`, and add
+`<PUBLIC_APP_URL>/api/auth/google/callback` to Google Cloud's authorized
+redirect URIs. Forward port 3000 in Codespaces and make it public if Google
+needs to reach the OAuth callback; keep the API and database ports private.
+Then run the same `docker compose up --build -d` command and open the forwarded
+port URL.
+
+Local-mode scans run inside the API container and therefore see the container
+filesystem, not the Codespace host filesystem. For scanning the Codespace (or
+another device), set `SCAN_MODE=agent`, rebuild/restart the stack, then enroll
+and run the agent from that device using the command shown in **Settings**.
+The agent connects through the forwarded dashboard URL.
+
+Compose creates a separate PostgreSQL database and does not automatically
+import a database installed directly on the host. Export and restore existing
+data separately if you need to keep it.
+
+### Run directly on your machine (without Docker)
+
 ### Prerequisites
 
 | Tool | Version |
@@ -80,7 +184,9 @@ npm run db:seed --workspace @change-detective/api
 ```
 
 The Prisma workspace commands load `DATABASE_URL` from the repository-root
-`.env` file, matching the API and seed scripts.
+`.env` file, matching the API and seed scripts. Docker Compose sets
+`DATABASE_URL` internally for its bundled database; use `COMPOSE_DATABASE_URL`
+with `compose.cloud.yaml` for a managed database.
 
 ### 5. Start the API and dashboard
 
@@ -232,6 +338,7 @@ change-detective/
 | `AUTH_SECRET` | generated per development process | Session-signing secret; set a persistent value of at least 32 bytes in production |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | — | OAuth web application credentials from Google Cloud Console |
 | `BOOTSTRAP_EMAIL` | — | Optional Google account email allowed to claim existing legacy data |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Compose development defaults | Credentials for the Compose PostgreSQL container; use a strong URL-safe password outside local development |
 
 ---
 
@@ -239,6 +346,8 @@ change-detective/
 
 - The API binds to `127.0.0.1` (localhost only) by default. **Do not expose it to the network.**
 - Database credentials stay in `.env` — never commit `.env`.
+- Change the development PostgreSQL password before using Docker Compose on a shared or publicly reachable host.
+- In Compose, only the web port is published by default; keep the API and PostgreSQL on the private Compose network.
 - The dashboard requires Google sign-in. Keep OAuth client secrets and `AUTH_SECRET` out of source control.
 - The agent sends measurements only to its enrolled service over HTTPS.
 - User data is scoped by account. Configure Google OAuth and HTTPS before deploying the portal publicly.
@@ -288,6 +397,7 @@ not remove already-created backups.
 | `ECONNREFUSED` on API health | Check PostgreSQL is running: `pg_isready` |
 | `DATABASE_URL` error | Verify `.env` has correct credentials |
 | Migration error | Check `npx prisma migrate status` |
+| Docker containers are unhealthy | Run `docker compose ps` and `docker compose logs api db`; check OAuth and database settings in `.env` |
 | Scan stuck in `running` | Restart the API — stale scans are recovered automatically on startup |
 | Symlink test skipped | Check whether your user has permission to create symlinks in the test environment |
 

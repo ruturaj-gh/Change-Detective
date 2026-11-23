@@ -1,0 +1,49 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 3001
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:?Set COMPOSE_DATABASE_URL in .env or Codespaces secrets}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      BOOTSTRAP_EMAIL: ${BOOTSTRAP_EMAIL:-}
+      SCAN_MODE: ${SCAN_MODE:-agent}
+      NODE_ENV: ${NODE_ENV:-production}
+    volumes:
+      - api-data:/app/apps/api/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: http://api:3001
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+volumes:
+  api-data:
