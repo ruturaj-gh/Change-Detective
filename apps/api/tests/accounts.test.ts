@@ -9,14 +9,30 @@ const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
   update: vi.fn(),
   create: vi.fn(),
+  transaction: vi.fn(),
+  updateMany: vi.fn(),
+  settingsFindUnique: vi.fn(),
+  settingsDelete: vi.fn(),
+  settingsUpdate: vi.fn(),
+  userDelete: vi.fn(),
 }));
 
 vi.mock("../src/db/client.js", () => ({
   prisma: {
+    $transaction: mocks.transaction,
     user: {
       findUnique: mocks.findUnique,
       update: mocks.update,
+      updateMany: mocks.updateMany,
       create: mocks.create,
+      delete: mocks.userDelete,
+    },
+    device: { updateMany: mocks.updateMany },
+    agentEnrollment: { updateMany: mocks.updateMany },
+    settings: {
+      findUnique: mocks.settingsFindUnique,
+      delete: mocks.settingsDelete,
+      update: mocks.settingsUpdate,
     },
   },
 }));
@@ -29,6 +45,24 @@ describe("Google account linking", () => {
       email: "person@example.com",
       sessionVersion: 0,
     });
+    mocks.transaction.mockImplementation(
+      async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          user: {
+            updateMany: mocks.updateMany,
+            delete: mocks.userDelete,
+          },
+          device: { updateMany: mocks.updateMany },
+          agentEnrollment: { updateMany: mocks.updateMany },
+          settings: {
+            findUnique: mocks.settingsFindUnique,
+            delete: mocks.settingsDelete,
+            update: mocks.settingsUpdate,
+          },
+        })
+    );
+    mocks.updateMany.mockResolvedValue({ count: 1 });
+    mocks.settingsFindUnique.mockResolvedValue(null);
     mocks.create.mockResolvedValue({
       id: "new-account",
       email: "person@example.com",
@@ -96,5 +130,33 @@ describe("Google account linking", () => {
       })
     );
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("moves legacy devices to an existing account when its email is allowlisted", async () => {
+    mocks.findUnique
+      .mockResolvedValueOnce({
+        id: "account-id",
+        email: "owner@example.com",
+        privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
+        privacyAcceptedAt: new Date(),
+      })
+      .mockResolvedValueOnce({ isLegacy: true });
+
+    await signInWithGoogle(
+      "google-subject",
+      "owner@example.com",
+      "owner@example.com"
+    );
+
+    expect(mocks.transaction).toHaveBeenCalledOnce();
+    expect(mocks.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: LEGACY_USER_ID },
+        data: { userId: "account-id" },
+      })
+    );
+    expect(mocks.userDelete).toHaveBeenCalledWith({
+      where: { id: LEGACY_USER_ID },
+    });
   });
 });

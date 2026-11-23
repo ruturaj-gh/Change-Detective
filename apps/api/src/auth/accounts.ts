@@ -8,6 +8,46 @@ function normalizedEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+async function claimLegacyData(userId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.user.updateMany({
+      where: { id: LEGACY_USER_ID, isLegacy: true },
+      data: { isLegacy: false },
+    });
+    if (claimed.count === 0) return;
+
+    await tx.device.updateMany({
+      where: { userId: LEGACY_USER_ID },
+      data: { userId },
+    });
+    await tx.agentEnrollment.updateMany({
+      where: { userId: LEGACY_USER_ID },
+      data: { userId },
+    });
+
+    const legacySettings = await tx.settings.findUnique({
+      where: { userId: LEGACY_USER_ID },
+      select: { id: true },
+    });
+    if (legacySettings) {
+      const currentSettings = await tx.settings.findUnique({
+        where: { userId },
+        select: { id: true },
+      });
+      if (currentSettings) {
+        await tx.settings.delete({ where: { userId: LEGACY_USER_ID } });
+      } else {
+        await tx.settings.update({
+          where: { userId: LEGACY_USER_ID },
+          data: { userId },
+        });
+      }
+    }
+
+    await tx.user.delete({ where: { id: LEGACY_USER_ID } });
+  });
+}
+
 export async function signInWithGoogle(
   googleSubject: string,
   email: string,
@@ -23,7 +63,7 @@ export async function signInWithGoogle(
     where: { googleSubject },
   });
   if (existingBySubject) {
-    return prisma.user.update({
+    const account = await prisma.user.update({
       where: { id: existingBySubject.id },
       data: {
         email: normalized,
@@ -35,6 +75,10 @@ export async function signInWithGoogle(
       },
       select: { id: true, email: true, sessionVersion: true },
     });
+    if (bootstrapEmail === normalized) {
+      await claimLegacyData(account.id);
+    }
+    return account;
   }
 
   const existingByEmail = await prisma.user.findUnique({
@@ -47,7 +91,7 @@ export async function signInWithGoogle(
     ) {
       throw new Error("This email is already linked to another Google account.");
     }
-    return prisma.user.update({
+    const account = await prisma.user.update({
       where: { id: existingByEmail.id },
       data: {
         googleSubject,
@@ -60,6 +104,10 @@ export async function signInWithGoogle(
       },
       select: { id: true, email: true, sessionVersion: true },
     });
+    if (bootstrapEmail === normalized) {
+      await claimLegacyData(account.id);
+    }
+    return account;
   }
 
   if (bootstrapEmail === normalized) {

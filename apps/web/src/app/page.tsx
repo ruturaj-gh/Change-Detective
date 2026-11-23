@@ -20,6 +20,7 @@ function ScanNowButton({ devices, scanMode, onScanStarted, onScanUpdated }: { de
   const eligibleDevices = devices.filter((device) =>
     scanMode === "agent" ? device.isAgent : !device.isAgent
   );
+  const canStartScan = scanMode === "local" || eligibleDevices.length > 0;
 
   useEffect(() => {
     if (!eligibleDevices.some((device) => device.id === selectedDeviceId)) {
@@ -92,12 +93,12 @@ function ScanNowButton({ devices, scanMode, onScanStarted, onScanUpdated }: { de
       )}
       <button
         onClick={() => void startScan()}
-        disabled={!eligibleDevices.length}
-        title={!eligibleDevices.length ? "Add a scanning device in Settings first." : undefined}
+        disabled={!canStartScan}
+        title={!canStartScan ? "Add a scanning device in Settings first." : undefined}
         className="flex items-center gap-2 bg-accent hover:bg-accent/80 text-black text-sm px-4 py-2 rounded-lg font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50"
       >
         <ScanLine size={14} />
-        {eligibleDevices.length ? "Scan now" : "Add a device in Settings"}
+        {canStartScan ? "Scan now" : "Add a device in Settings"}
       </button>
     </div>
   );
