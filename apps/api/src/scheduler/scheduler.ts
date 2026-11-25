@@ -1,11 +1,13 @@
 /**
  * Scheduler — Phase 5.
  *
- * Runs periodic scans while the API process is alive.
+ * Runs periodic scans while the API process is alive in local scan mode.
+ * In agent mode, the enrolled device owns periodic scans so they continue
+ * while the API or network is unavailable.
  * - Single-flight: will not start a new scan if one is already running.
  * - Reads interval from the database settings on each tick.
  * - Never silently invents missed snapshots.
- * - Documented: scheduled scans only occur while this process is running.
+ * - Local-mode scheduled scans only occur while this process is running.
  */
 import { startScan } from "../services/scan.service.js";
 import { prisma } from "../db/client.js";
@@ -73,14 +75,13 @@ async function scheduleNextTick(): Promise<void> {
     }
 
     for (const accountSettings of settings) {
+      if (process.env["SCAN_MODE"] === "agent") continue;
       const intervalMs = accountSettings.scanIntervalMinutes * 60 * 1000;
       const previousTick = lastScheduledAt.get(accountSettings.userId) ?? now;
       if (now - previousTick < intervalMs) continue;
 
-      const devices = accountSettings.user.devices.filter((device) =>
-        process.env["SCAN_MODE"] === "agent"
-          ? device.agentTokenHash !== null
-          : device.agentTokenHash === null
+      const devices = accountSettings.user.devices.filter(
+        (device) => device.agentTokenHash === null
       );
       for (const device of devices) {
         try {

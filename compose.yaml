@@ -29,6 +29,8 @@ services:
       API_PORT: 3001
       DATABASE_URL: postgresql://${POSTGRES_USER:-change_detective}:${POSTGRES_PASSWORD:-change_detective_local}@db:5432/${POSTGRES_DB:-change_detective}?schema=public
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
+      CODESPACE_NAME: ${CODESPACE_NAME:-}
+      GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: ${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       AUTH_SECRET: ${AUTH_SECRET:-}

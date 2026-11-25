@@ -56,6 +56,19 @@ export function loadAuthConfig(): AuthConfig {
   if (!["http:", "https:"].includes(parsedPublicUrl.protocol)) {
     throw new Error("PUBLIC_APP_URL must use HTTP or HTTPS.");
   }
+  const codespaceName = process.env["CODESPACE_NAME"]?.trim();
+  const forwardingDomain = process.env[
+    "GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN"
+  ]?.trim();
+  if (
+    ["localhost", "127.0.0.1", "[::1]"].includes(parsedPublicUrl.hostname) &&
+    codespaceName &&
+    forwardingDomain
+  ) {
+    parsedPublicUrl = new URL(
+      `https://${codespaceName}-3000.${forwardingDomain}`
+    );
+  }
   if (isProduction && parsedPublicUrl.protocol !== "https:") {
     throw new Error("PUBLIC_APP_URL must be an HTTPS URL in production.");
   }

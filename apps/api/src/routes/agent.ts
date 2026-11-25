@@ -8,9 +8,11 @@ import {
   authenticateAgentToken,
   claimNextAgentTask,
   enrollAgent,
+  getAgentScanIntervalMinutes,
   InvalidAgentScanResultError,
   InvalidEnrollmentTokenError,
   renewAgentTaskLease,
+  saveAgentLocalScanResult,
   saveAgentScanResult,
 } from "../services/agent.service.js";
 import { AgentScanResultSchema } from "../schemas/agent.js";
@@ -66,8 +68,10 @@ export const agentRoutes: FastifyPluginAsync = async (fastify) => {
     const device = await authenticate(request, reply);
     if (!device) return;
 
+    const scanIntervalMinutes = await getAgentScanIntervalMinutes(device.id);
     const task = await claimNextAgentTask(device.id);
     return reply.send({
+      scanIntervalMinutes,
       task: task
         ? {
             scanId: task.id,
@@ -78,6 +82,40 @@ export const agentRoutes: FastifyPluginAsync = async (fastify) => {
       pollAfterSeconds: 30,
     });
   });
+
+  fastify.post<{ Params: { scanId: string } }>(
+    "/agent/scans/local/:scanId/results",
+    async (request, reply) => {
+      const device = await authenticate(request, reply);
+      if (!device) return;
+
+      const scanId = z.string().uuid().safeParse(request.params.scanId);
+      const submission = z
+        .object({
+          triggerType: z.enum(["scheduled", "event"]),
+          result: AgentScanResultSchema,
+        })
+        .safeParse(request.body);
+      if (!scanId.success || !submission.success) {
+        return reply.status(400).send({ error: "INVALID_SCAN_RESULT" });
+      }
+
+      try {
+        await saveAgentLocalScanResult(
+          device.id,
+          scanId.data,
+          submission.data.triggerType,
+          submission.data.result
+        );
+      } catch (error) {
+        if (error instanceof InvalidAgentScanResultError) {
+          return reply.status(409).send({ error: "SCAN_RESULT_REJECTED" });
+        }
+        throw error;
+      }
+      return reply.status(202).send({ accepted: true });
+    }
+  );
 
   fastify.post<{ Params: { scanId: string } }>(
     "/agent/scans/:scanId/heartbeat",

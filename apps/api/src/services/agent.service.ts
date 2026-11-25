@@ -156,6 +156,24 @@ export async function authenticateAgentToken(token: string) {
   return device;
 }
 
+export async function getAgentScanIntervalMinutes(deviceId: string): Promise<number> {
+  const device = await prisma.device.findUniqueOrThrow({
+    where: { id: deviceId },
+    select: {
+      user: {
+        select: {
+          settings: { select: { scanIntervalMinutes: true } },
+        },
+      },
+    },
+  });
+  const interval = device.user.settings?.scanIntervalMinutes;
+  if (interval === undefined) {
+    throw new Error(`Agent device ${deviceId} has no account scan settings.`);
+  }
+  return interval;
+}
+
 export async function claimNextAgentTask(deviceId: string) {
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT "id" FROM "devices" WHERE "id" = ${deviceId}::uuid FOR UPDATE`;
@@ -230,7 +248,7 @@ export async function saveAgentScanResult(
 ): Promise<void> {
   const device = await prisma.device.findUnique({ where: { id: deviceId } });
   const scan = await prisma.scan.findFirst({
-    where: { id: scanId, deviceId, status: "running" },
+    where: { id: scanId, deviceId },
   });
   if (!device || !scan) {
     throw new InvalidAgentScanResultError(
@@ -243,6 +261,19 @@ export async function saveAgentScanResult(
   ) {
     throw new InvalidAgentScanResultError(
       "The agent result root does not match the authorized scan root."
+    );
+  }
+  if (
+    scan.status === "completed" ||
+    scan.status === "partial" ||
+    scan.status === "failed" ||
+    scan.status === "cancelled"
+  ) {
+    return;
+  }
+  if (scan.status !== "running") {
+    throw new InvalidAgentScanResultError(
+      "The scan is not active for this enrolled device."
     );
   }
 
@@ -337,4 +368,67 @@ export async function saveAgentScanResult(
       );
     }
   }
+}
+
+export async function saveAgentLocalScanResult(
+  deviceId: string,
+  scanId: string,
+  triggerType: "scheduled" | "event",
+  result: AgentScanResult
+): Promise<void> {
+  const device = await prisma.device.findUnique({ where: { id: deviceId } });
+  if (
+    !device ||
+    device.monitoredRoot === null ||
+    normalizePath(result.rootPath) !== normalizePath(device.monitoredRoot)
+  ) {
+    throw new InvalidAgentScanResultError(
+      "The agent result root does not match the authorized scan root."
+    );
+  }
+
+  await prisma.scan.createMany({
+    data: [
+      {
+        id: scanId,
+        deviceId,
+        rootPath: normalizePath(device.monitoredRoot),
+        triggerType,
+        status: "running",
+        startedAt: new Date(result.startedAt),
+      },
+    ],
+    skipDuplicates: true,
+  });
+  const scan = await prisma.scan.findUnique({ where: { id: scanId } });
+  if (
+    !scan ||
+    scan.deviceId !== deviceId ||
+    scan.rootPath !== normalizePath(device.monitoredRoot)
+  ) {
+    throw new InvalidAgentScanResultError(
+      "The scan ID is not available for this enrolled device."
+    );
+  }
+
+  if (scan.status !== "running" && scan.status !== "queued") {
+    return;
+  }
+  if (scan.status === "queued") {
+    const claimed = await prisma.scan.updateMany({
+      where: { id: scanId, deviceId, status: "queued" },
+      data: { status: "running" },
+    });
+    if (claimed.count !== 1) {
+      const current = await prisma.scan.findUnique({ where: { id: scanId } });
+      if (current && current.status !== "running" && current.status !== "queued") {
+        return;
+      }
+      if (!current) {
+        throw new InvalidAgentScanResultError("The scan is no longer available.");
+      }
+    }
+  }
+
+  await saveAgentScanResult(deviceId, scanId, result);
 }

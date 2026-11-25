@@ -2,7 +2,11 @@
 
 > **Browser-based storage history** — understand what changed on your computer, starting with disk/storage growth.
 
-The dashboard is a web app. Local development can run the API, scanner, and PostgreSQL on Linux or Windows. A separately installed Node.js agent connects outbound to report scans from Windows, macOS, or Linux. Android support is best-effort through Termux; this is not a native Android app.
+The dashboard is a web app. Local development can run the API, scanner, and PostgreSQL on Linux, macOS, or Windows. A separately installed Node.js agent connects outbound to report scans from those same platforms. Android support is best-effort through Termux; this is not a native Android app.
+
+Storage is the initial observation domain. The agent architecture can support
+separately consented capabilities later, but Change Detective does not aim to
+collect broad process, application, or system telemetry by default.
 
 > [!NOTE]
 > **Current status:** Per-account data isolation, Google OAuth sign-in, per-account devices and settings, account deletion, and an outbound multi-platform agent protocol are implemented. Windows, macOS, and Linux agent deployments still need validation on their target platforms; Android is best-effort through Termux. The hosted flow still needs validation with production Google OAuth, a live database, HTTPS, and independent accounts. Do not expose the service publicly until those checks and production deployment controls are complete.
@@ -94,12 +98,15 @@ and restore only into a fresh target database.
 #### GitHub Codespaces
 
 Open the repository in a Codespace and rebuild the dev container if prompted;
-the included dev-container configuration provides Docker. Set `PUBLIC_APP_URL`
-in the root `.env` to the forwarded HTTPS URL for port
-3000, for example `https://YOUR-CODESPACE-NAME-3000.app.github.dev`, and add
-`<PUBLIC_APP_URL>/api/auth/google/callback` to Google Cloud's authorized
-redirect URIs. Forward port 3000 in Codespaces and make it public if Google
-needs to reach the OAuth callback; keep the API and database ports private.
+the included dev-container configuration provides Docker. The API detects the
+Codespace's forwarded HTTPS origin when `PUBLIC_APP_URL` is still set to its
+localhost default. Add
+`https://YOUR-CODESPACE-NAME-3000.app.github.dev/api/auth/google/callback`
+to Google Cloud's authorized redirect URIs, replacing the name with the
+Codespace's actual forwarded URL. Forward port 3000 in Codespaces and make it
+public if Google needs to reach the OAuth callback; keep the API and database
+ports private. Set `PUBLIC_APP_URL` explicitly if using a custom dashboard
+domain.
 Then run the same `docker compose up --build -d` command and open the forwarded
 port URL.
 
@@ -194,7 +201,8 @@ with `compose.cloud.yaml` for a managed database.
 npm run dev
 ```
 
-This builds the scanner package, then starts the API and dashboard concurrently.
+This builds the scanner package, generates the Prisma client, then starts the API
+and dashboard concurrently.
 Open `http://localhost:3000` in your browser.
 
 ### 6. Verify
@@ -219,7 +227,20 @@ refused. Agent credentials are saved under
 `$XDG_CONFIG_HOME/change-detective/agent.json` (or `~/.config/...`) on
 Linux/macOS/Termux, with directory/file permissions `0700`/`0600`. Windows
 stores it under `%APPDATA%\change-detective\agent.json` and relies on the
-current user's inherited Windows ACLs.
+current user's inherited Windows ACLs. The agent also stores its SQLite upload
+queue and schedule state as `agent.sqlite` in the same private configuration
+directory.
+
+The agent runs periodic full scans using the account's configured interval, so
+collection continues while the API is unreachable. Completed results remain
+in the local SQLite queue and are retried until the API acknowledges them. The
+queue is bounded; when it nears capacity, new scans and task polling pause
+rather than discarding queued evidence. Recursive filesystem notifications
+are best-effort signals that trigger a debounced full scan; periodic scans
+remain the measurement baseline. Node's shared filesystem watcher uses the
+platform backend (inotify on Linux, ReadDirectoryChangesW on Windows, and
+FSEvents on macOS). If the platform cannot watch the approved root, the agent
+logs that event monitoring is unavailable and continues with periodic scans.
 
 For a hosted setup:
 
@@ -233,23 +254,38 @@ For a hosted setup:
    and is single-use. Android users need Termux with Node.js and must run
    `termux-setup-storage` before choosing an accessible monitored directory.
 4. Keep the agent process running. Dashboard scans are queued for it;
-   it polls every 30 seconds and renews long-running task leases.
+   it polls every 30 seconds and renews long-running task leases. Periodic
+   local scans and event-triggered rescans run independently of dashboard
+   requests. Build the agent before installing a per-user startup task:
+   - Linux: `bash apps/agent/scripts/install-linux-user-service.sh`
+     (systemd user service); remove with
+     `bash apps/agent/scripts/uninstall-linux-user-service.sh`.
+   - macOS: `bash apps/agent/scripts/install-macos-launch-agent.sh`
+     (LaunchAgent); remove with
+     `bash apps/agent/scripts/uninstall-macos-launch-agent.sh`.
+   - Windows: run
+     `.\apps\agent\scripts\install-windows-startup.ps1` from the repository
+     root in PowerShell (Task Scheduler); remove with
+     `.\apps\agent\scripts\uninstall-windows-startup.ps1`.
 5. To revoke access, use **Revoke access** in Settings. Existing snapshots are
    retained, while queued/running scans are failed.
 
-The agent is currently started in a foreground terminal; a systemd service,
-installer, deployment automation, and live database/reverse-proxy validation
-are still future work. Android/Termux and other Node.js platforms are best-effort
-and depend on filesystem API and permission support. If changing the monitored
-root, update the local agent configuration file as well. After revoking an
-agent, remove its saved local credential before enrolling it again:
+The systemd user service, LaunchAgent, and Windows logon task all run the
+agent as the current user; none requires a kernel module or administrator
+privileges for ordinary user-owned roots. A packaged installer, deployment
+automation, and live database/reverse-proxy validation remain future work.
+Android/Termux is best-effort and depends on filesystem API and permission
+support. If changing the monitored root, update the local agent configuration
+file as well. After revoking an agent, remove its saved local credential and
+local queue before enrolling it again:
 
 ```bash
 rm -- "${XDG_CONFIG_HOME:-$HOME/.config}/change-detective/agent.json"
+rm -- "${XDG_CONFIG_HOME:-$HOME/.config}/change-detective/agent.sqlite"
 ```
 
-On Windows, remove `%APPDATA%\change-detective\agent.json` from the scanning
-user's profile.
+On Windows, remove `%APPDATA%\change-detective\agent.json` and
+`%APPDATA%\change-detective\agent.sqlite` from the scanning user's profile.
 
 Never put the enrollment token or agent bearer token in a command-line
 argument, source control, or logs.
@@ -384,7 +420,7 @@ not remove already-created backups.
 
 - **Symlink/junction skipping:** Requires elevated privileges to create test symlinks. The scanner skips all Windows reparse points by design to prevent double-counting.
 - **Logical file size:** Reports `stat.size` (logical bytes), not allocated disk blocks. Drive totals will differ from OS-reported used space due to filesystem overhead, sparse files, and protected paths.
-- **Scheduled scans:** Only run while the API process is alive. If the process stops, scheduled scans do not occur (by design).
+- **Scheduled scans:** In agent mode, the enrolled agent runs local periodic scans while its process is active and queues results offline. In local scan mode, scheduled scans still depend on the API process being alive.
 - **First scan = baseline:** No change detection until a second scan completes against the same root.
 - **Android scanning:** Android requires a separately installed Termux agent and explicit storage permission; using the dashboard in an Android browser alone does not scan phone storage.
 

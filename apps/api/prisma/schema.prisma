@@ -9,8 +9,6 @@
 
 generator client {
   provider = "prisma-client-js"
-  // Output to a location accessible from the monorepo
-  output   = "../../../node_modules/.prisma/client"
 }
 
 datasource db {
@@ -85,7 +83,7 @@ model Scan {
   device                    Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   deviceId                  String    @map("device_id") @db.Uuid
   rootPath                  String    @map("root_path")
-  triggerType               String    @map("trigger_type") // "manual" | "scheduled"
+  triggerType               String    @map("trigger_type") // "manual" | "scheduled" | "event"
   status                    String    // "queued"|"running"|"completed"|"partial"|"failed"|"cancelled"
   startedAt                 DateTime  @default(now()) @map("started_at") @db.Timestamptz
   agentLeaseUntil           DateTime? @map("agent_lease_until") @db.Timestamptz

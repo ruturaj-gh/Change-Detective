@@ -39,8 +39,8 @@ export interface ScanOptions {
 export interface ScanMeta {
   /** Caller-generated scan ID (UUID). */
   scanId?: string;
-  /** Whether this was triggered manually or by the scheduler. */
-  triggerType?: "manual" | "scheduled";
+  /** What caused this scan to run. */
+  triggerType?: "manual" | "scheduled" | "event";
 }
 
 // ---------------------------------------------------------------------------

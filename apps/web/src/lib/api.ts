@@ -105,7 +105,7 @@ export interface Scan {
   id: string;
   deviceId: string;
   rootPath: string;
-  triggerType: "manual" | "scheduled";
+  triggerType: "manual" | "scheduled" | "event";
   status: "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;

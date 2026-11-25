@@ -23,11 +23,11 @@ COPY . .
 
 ARG NEXT_PUBLIC_API_URL=http://api:3001
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV DATABASE_URL=postgresql://build:build@localhost:5432/build
 
 RUN npm run build --workspace @change-detective/scanner \
-    && DATABASE_URL=postgresql://build:build@localhost:5432/build \
-       npm run db:generate --workspace @change-detective/api \
-    && npm run build --workspace @change-detective/api \
+    && npm run db:generate --workspace @change-detective/api \
+    && npx tsc --build apps/api/tsconfig.json --force \
     && npm run build --workspace @change-detective/web
 
 FROM base AS api

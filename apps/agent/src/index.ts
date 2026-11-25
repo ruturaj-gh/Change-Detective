@@ -4,6 +4,11 @@ import { isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { scan, normalizePath, serializeScanResult } from "@change-detective/scanner";
 import { z } from "zod";
+import {
+  createFileChangeMonitor,
+  type FileChangeMonitor,
+} from "./file-change-monitor.js";
+import { LocalAgentStore, type PendingScan } from "./local-store.js";
 
 const AgentConfigSchema = z.object({
   apiUrl: z.string().url(),
@@ -13,6 +18,7 @@ const AgentConfigSchema = z.object({
 });
 
 const TaskSchema = z.object({
+  scanIntervalMinutes: z.number().int().min(15).max(10080),
   task: z
     .object({
       scanId: z.string().uuid(),
@@ -35,6 +41,11 @@ const CONFIG_DIR = join(CONFIG_BASE_DIR, "change-detective");
 const CONFIG_FILE = join(CONFIG_DIR, "agent.json");
 
 class AgentAuthenticationError extends Error {}
+class AgentHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`API request failed with HTTP ${status}.`);
+  }
+}
 
 function normalizeApiUrl(value: string): string {
   const parsed = new URL(value);
@@ -188,7 +199,7 @@ async function requestJson(
     );
   }
   if (!response.ok) {
-    throw new Error(`API request failed with HTTP ${response.status}.`);
+    throw new AgentHttpError(response.status);
   }
   return response.json();
 }
@@ -217,34 +228,90 @@ function resultPayload(result: Awaited<ReturnType<typeof scan>>) {
   };
 }
 
-async function submitResult(
-  config: AgentConfig,
-  scanId: string,
-  result: Awaited<ReturnType<typeof scan>>
-): Promise<void> {
-  await requestJson(
-    config.apiUrl,
-    `/api/agent/scans/${encodeURIComponent(scanId)}/results`,
-    {
-      method: "POST",
-      token: config.agentToken,
-      body: resultPayload(result),
-    }
-  );
-}
-
 let stopping = false;
 let activeScan: AbortController | null = null;
+let wakeSleep: (() => void) | null = null;
 const stopAgent = () => {
   stopping = true;
   activeScan?.abort();
+  wakeSleep?.();
 };
 
-async function executeTask(config: AgentConfig, task: ScanTask): Promise<void> {
+async function flushPending(
+  config: AgentConfig,
+  store: LocalAgentStore
+): Promise<void> {
+  for (const pending of store.listPending()) {
+    const localPath =
+      `/api/agent/scans/local/${encodeURIComponent(pending.scanId)}/results`;
+    const taskPath =
+      `/api/agent/scans/${encodeURIComponent(pending.scanId)}/results`;
+    try {
+      await requestJson(
+        config.apiUrl,
+        pending.source === "local" ? localPath : taskPath,
+        {
+          method: "POST",
+          token: config.agentToken,
+          body:
+            pending.source === "local"
+              ? { triggerType: pending.triggerType, result: pending.result }
+              : pending.result,
+        }
+      );
+      store.removePending(pending.scanId);
+      console.log(`Synchronized scan ${pending.scanId}.`);
+    } catch (error) {
+      if (error instanceof AgentAuthenticationError) throw error;
+      if (
+        error instanceof AgentHttpError &&
+        error.status < 500 &&
+        error.status !== 408 &&
+        error.status !== 429
+      ) {
+        console.error(
+          `The API rejected scan ${pending.scanId} with HTTP ${error.status}; the result remains in SQLite and later queued scans will still be synchronized.`
+        );
+        continue;
+      }
+      console.error(
+        `Could not synchronize scan ${pending.scanId}; it remains in the local queue:`,
+        error instanceof Error ? error.message : "unknown error"
+      );
+      return;
+    }
+  }
+}
+
+function enqueueResult(
+  store: LocalAgentStore,
+  scanId: string,
+  source: PendingScan["source"],
+  triggerType: PendingScan["triggerType"],
+  result: Awaited<ReturnType<typeof scan>>,
+  nextScheduledAt?: number
+): void {
+  store.enqueue(
+    {
+      scanId,
+      source,
+      triggerType,
+      result: resultPayload(result),
+      createdAt: new Date().toISOString(),
+    },
+    nextScheduledAt
+  );
+}
+
+async function executeTask(
+  config: AgentConfig,
+  store: LocalAgentStore,
+  task: ScanTask
+): Promise<void> {
   const taskRoot = normalizePath(task.rootPath);
   if (taskRoot !== config.monitoredRoot) {
     const now = new Date().toISOString();
-    await submitResult(config, task.scanId, {
+    const result = {
       rootPath: taskRoot,
       startedAt: now,
       completedAt: now,
@@ -257,7 +324,8 @@ async function executeTask(config: AgentConfig, task: ScanTask): Promise<void> {
       totalErrorCount: 0,
       errorMessage:
         "The requested root does not match the path approved in the local agent configuration.",
-    });
+    } satisfies Awaited<ReturnType<typeof scan>>;
+    enqueueResult(store, task.scanId, "task", task.triggerType, result);
     return;
   }
 
@@ -269,11 +337,15 @@ async function executeTask(config: AgentConfig, task: ScanTask): Promise<void> {
       `/api/agent/scans/${encodeURIComponent(task.scanId)}/heartbeat`,
       { method: "POST", token: config.agentToken, body: {} }
     ).catch((error: unknown) => {
-      console.error(
-        "Could not renew the scan task lease:",
+      if (error instanceof AgentAuthenticationError) {
+        console.error(error.message);
+        controller.abort();
+        return;
+      }
+      console.warn(
+        "Could not renew the scan task lease; the completed result will be queued for synchronization:",
         error instanceof Error ? error.message : "unknown error"
       );
-      controller.abort();
     });
   }, 60_000);
 
@@ -283,15 +355,103 @@ async function executeTask(config: AgentConfig, task: ScanTask): Promise<void> {
       signal: controller.signal,
       meta: { scanId: task.scanId, triggerType: task.triggerType },
     });
-    await submitResult(config, task.scanId, result);
+    if (result.status !== "cancelled") {
+      enqueueResult(store, task.scanId, "task", task.triggerType, result);
+    }
   } finally {
     clearInterval(heartbeat);
     activeScan = null;
   }
 }
 
+async function executeLocalScan(
+  config: AgentConfig,
+  store: LocalAgentStore,
+  triggerType: "scheduled" | "event",
+  scanIntervalMinutes: number
+): Promise<void> {
+  if (!store.hasCapacityForScan()) {
+    console.warn("Local scan skipped because the pending upload queue is near capacity.");
+    return;
+  }
+
+  const scanId = randomUUID();
+  const controller = new AbortController();
+  activeScan = controller;
+  try {
+    const result = await scan({
+      rootPath: config.monitoredRoot,
+      signal: controller.signal,
+      meta: { scanId, triggerType },
+    });
+    if (result.status === "cancelled" || stopping) return;
+
+    const nextScheduledAt =
+      triggerType === "scheduled"
+        ? new Date(result.completedAt).getTime() + scanIntervalMinutes * 60_000
+        : undefined;
+    enqueueResult(
+      store,
+      scanId,
+      "local",
+      triggerType,
+      result,
+      nextScheduledAt
+    );
+    console.log(
+      `${triggerType === "event" ? "Change-triggered" : "Periodic"} scan ${scanId} completed (${result.status}).`
+    );
+  } finally {
+    activeScan = null;
+  }
+}
+
+function sleep(seconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      wakeSleep = null;
+      resolve();
+    }, seconds * 1000);
+    wakeSleep = () => {
+      clearTimeout(timer);
+      wakeSleep = null;
+      resolve();
+    };
+  });
+}
+
 async function run(): Promise<void> {
   const config = await loadConfig();
+  const store = new LocalAgentStore(CONFIG_DIR);
+  const savedInterval = store.getScanIntervalMinutes();
+  let scanIntervalMinutes = savedInterval ?? 360;
+  let needsInitialInterval = savedInterval === null;
+  let nextScheduledAt = store.getNextScheduledAt() ?? Date.now();
+  let eventScanDue = false;
+  let eventDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastEventScanAt = 0;
+  const watcher: FileChangeMonitor | null = createFileChangeMonitor(
+    config.monitoredRoot,
+    () => {
+      if (eventDebounceTimer) clearTimeout(eventDebounceTimer);
+      eventDebounceTimer = setTimeout(() => {
+        eventScanDue = true;
+        wakeSleep?.();
+      }, 30_000);
+    },
+    (error) => {
+      const code =
+        "code" in error ? String(error.code) : "unknown error";
+      console.warn(
+        "Filesystem event monitoring failed; periodic scans remain authoritative.",
+        code
+      );
+    }
+  );
+  if (watcher) {
+    console.log("Filesystem event monitoring is active.");
+  }
+
   console.log(
     `${getAgentOsName()} agent ready to scan ${config.monitoredRoot}.`
   );
@@ -299,33 +459,130 @@ async function run(): Promise<void> {
   process.on("SIGINT", stopAgent);
   process.on("SIGTERM", stopAgent);
 
-  while (!stopping) {
-    let delaySeconds = 15;
-    try {
-      const response = TaskSchema.parse(
-        await requestJson(config.apiUrl, "/api/agent/tasks/next", {
-          method: "GET",
-          token: config.agentToken,
-        })
-      );
-      delaySeconds = response.pollAfterSeconds;
-      if (response.task) {
-        await executeTask(config, response.task);
-        delaySeconds = 5;
+  try {
+    while (!stopping) {
+      let delaySeconds = 30;
+      let polledForTask = false;
+      try {
+        await flushPending(config, store);
+      } catch (error) {
+        if (error instanceof AgentAuthenticationError) throw error;
+        console.error(
+          "Could not read the local scan queue:",
+          error instanceof Error ? error.message : "unknown error"
+        );
       }
-    } catch (error) {
-      if (error instanceof AgentAuthenticationError) throw error;
-      console.error(
-        "Agent request failed:",
-        error instanceof Error ? error.message : "unknown error"
-      );
-    }
 
-    if (!stopping) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.max(5, Math.min(300, delaySeconds)) * 1000)
-      );
+      if (stopping) break;
+      if (needsInitialInterval && store.hasCapacityForScan()) {
+        let initialResponse: z.infer<typeof TaskSchema> | null = null;
+        try {
+          initialResponse = TaskSchema.parse(
+            await requestJson(config.apiUrl, "/api/agent/tasks/next", {
+              method: "GET",
+              token: config.agentToken,
+            })
+          );
+        } catch (error) {
+          if (error instanceof AgentAuthenticationError) throw error;
+          console.error(
+            "Could not load the initial scan schedule:",
+            error instanceof Error ? error.message : "unknown error"
+          );
+          store.setScanIntervalMinutes(scanIntervalMinutes);
+          nextScheduledAt = store.getNextScheduledAt() ?? Date.now();
+          store.setNextScheduledAt(nextScheduledAt);
+          needsInitialInterval = false;
+        }
+        if (initialResponse) {
+          delaySeconds = initialResponse.pollAfterSeconds;
+          scanIntervalMinutes = initialResponse.scanIntervalMinutes;
+          store.setScanIntervalMinutes(scanIntervalMinutes);
+          nextScheduledAt = store.getNextScheduledAt() ?? Date.now();
+          store.setNextScheduledAt(nextScheduledAt);
+          needsInitialInterval = false;
+          polledForTask = true;
+          if (initialResponse.task) {
+            await executeTask(config, store, initialResponse.task);
+            continue;
+          }
+        }
+      }
+
+      const now = Date.now();
+      if (
+        eventScanDue &&
+        now < nextScheduledAt &&
+        now - lastEventScanAt >= 5 * 60_000 &&
+        store.hasCapacityForScan()
+      ) {
+        eventScanDue = false;
+        await executeLocalScan(config, store, "event", scanIntervalMinutes);
+        lastEventScanAt = Date.now();
+        continue;
+      }
+
+      if (now >= nextScheduledAt && store.hasCapacityForScan()) {
+        eventScanDue = false;
+        await executeLocalScan(
+          config,
+          store,
+          "scheduled",
+          scanIntervalMinutes
+        );
+        nextScheduledAt =
+          store.getNextScheduledAt() ??
+          Date.now() + scanIntervalMinutes * 60_000;
+        continue;
+      }
+
+      if (store.hasCapacityForScan() && !polledForTask) {
+        try {
+          const response = TaskSchema.parse(
+            await requestJson(config.apiUrl, "/api/agent/tasks/next", {
+              method: "GET",
+              token: config.agentToken,
+            })
+          );
+          delaySeconds = response.pollAfterSeconds;
+          const previousInterval = store.getScanIntervalMinutes();
+          const previousNextScan = store.getNextScheduledAt();
+          if (previousInterval !== null && previousNextScan !== null) {
+            const lastScheduledAt =
+              previousNextScan - previousInterval * 60_000;
+            nextScheduledAt =
+              lastScheduledAt + response.scanIntervalMinutes * 60_000;
+          }
+          scanIntervalMinutes = response.scanIntervalMinutes;
+          store.setScanIntervalMinutes(scanIntervalMinutes);
+          if (previousNextScan !== null) {
+            store.setNextScheduledAt(nextScheduledAt);
+          }
+          if (response.task) {
+            await executeTask(config, store, response.task);
+            continue;
+          }
+        } catch (error) {
+          if (error instanceof AgentAuthenticationError) throw error;
+          console.error(
+            "Agent request failed:",
+            error instanceof Error ? error.message : "unknown error"
+          );
+        }
+      } else {
+        console.warn(
+          "Agent upload queue is at capacity; new scans and task polling are paused until synchronization succeeds."
+        );
+      }
+
+      if (!stopping) {
+        await sleep(Math.max(5, Math.min(300, delaySeconds)));
+      }
     }
+  } finally {
+    if (eventDebounceTimer) clearTimeout(eventDebounceTimer);
+    watcher?.close();
+    store.close();
   }
 }
 
