@@ -125,7 +125,7 @@ describe("Google authentication routes", () => {
     expect(state).toBeTruthy();
     expect(mocks.generateAuthUrl).toHaveBeenCalledWith(
       expect.objectContaining({
-        state,
+        state: state?.split(".")[0],
         scope: ["openid", "email", "profile"],
         prompt: "select_account",
       })
@@ -137,15 +137,16 @@ describe("Google authentication routes", () => {
       method: "GET",
       url: "/api/auth/google?acceptPrivacy=true",
     });
-    const state = cookieValue(
+    const stateCookie = cookieValue(
       response.headers["set-cookie"],
       GOOGLE_STATE_COOKIE_NAME
     );
+    const state = stateCookie?.split(".")[0];
     const callback = await app.inject({
       method: "GET",
       url: `/api/auth/google/callback?code=oauth-code&state=${state}`,
       headers: {
-        cookie: `${GOOGLE_STATE_COOKIE_NAME}=${state}`,
+        cookie: `${GOOGLE_STATE_COOKIE_NAME}=${stateCookie}`,
       },
     });
 
@@ -164,12 +165,49 @@ describe("Google authentication routes", () => {
     );
   });
 
+  it("returns to the requested internal page after Google sign-in", async () => {
+    const next = "/pair-device/00000000-0000-4000-8000-000000000001";
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/auth/google?acceptPrivacy=true&next=${encodeURIComponent(next)}`,
+    });
+    const stateCookie = cookieValue(
+      response.headers["set-cookie"],
+      GOOGLE_STATE_COOKIE_NAME
+    );
+    const callback = await app.inject({
+      method: "GET",
+      url: `/api/auth/google/callback?code=oauth-code&state=${stateCookie?.split(".")[0]}`,
+      headers: { cookie: `${GOOGLE_STATE_COOKIE_NAME}=${stateCookie}` },
+    });
+
+    expect(callback.headers.location).toBe(`http://localhost:3000${next}`);
+  });
+
+  it("does not allow an external sign-in return URL", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/auth/google?acceptPrivacy=true&next=${encodeURIComponent("https://evil.example/")}`,
+    });
+    const stateCookie = cookieValue(
+      response.headers["set-cookie"],
+      GOOGLE_STATE_COOKIE_NAME
+    );
+    const callback = await app.inject({
+      method: "GET",
+      url: `/api/auth/google/callback?code=oauth-code&state=${stateCookie?.split(".")[0]}`,
+      headers: { cookie: `${GOOGLE_STATE_COOKIE_NAME}=${stateCookie}` },
+    });
+
+    expect(callback.headers.location).toBe("http://localhost:3000/");
+  });
+
   it("rejects callbacks with an invalid OAuth state", async () => {
     const callback = await app.inject({
       method: "GET",
       url: `/api/auth/google/callback?code=oauth-code&state=${"a".repeat(32)}`,
       headers: {
-        cookie: `${GOOGLE_STATE_COOKIE_NAME}=${"b".repeat(32)}`,
+        cookie: `${GOOGLE_STATE_COOKIE_NAME}=${"b".repeat(32)}.Lw`,
       },
     });
 
@@ -192,15 +230,16 @@ describe("Google authentication routes", () => {
       method: "GET",
       url: "/api/auth/google?acceptPrivacy=true",
     });
-    const state = cookieValue(
+    const stateCookie = cookieValue(
       start.headers["set-cookie"],
       GOOGLE_STATE_COOKIE_NAME
     );
+    const state = stateCookie?.split(".")[0];
     const callback = await app.inject({
       method: "GET",
       url: `/api/auth/google/callback?code=oauth-code&state=${state}`,
       headers: {
-        cookie: `${GOOGLE_STATE_COOKIE_NAME}=${state}`,
+        cookie: `${GOOGLE_STATE_COOKIE_NAME}=${stateCookie}`,
       },
     });
 
@@ -218,6 +257,10 @@ describe("Google authentication routes", () => {
     protectedApp.get("/api/private", async (request) => ({
       userId: request.authUserId,
     }));
+    protectedApp.get(
+      "/api/agent/pairings/00000000-0000-4000-8000-000000000001",
+      async () => ({ status: "pending" })
+    );
     await protectedApp.ready();
 
     const anonymous = await protectedApp.inject({
@@ -225,6 +268,12 @@ describe("Google authentication routes", () => {
       url: "/api/private",
     });
     expect(anonymous.statusCode).toBe(401);
+
+    const pairingPoll = await protectedApp.inject({
+      method: "GET",
+      url: "/api/agent/pairings/00000000-0000-4000-8000-000000000001",
+    });
+    expect(pairingPoll.statusCode).toBe(200);
 
     await protectedApp.close();
   });

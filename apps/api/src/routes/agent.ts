@@ -6,11 +6,14 @@ import type {
 import { z } from "zod";
 import {
   authenticateAgentToken,
+  createAgentPairing,
+  getAgentPairingStatus,
   claimNextAgentTask,
   enrollAgent,
   getAgentScanIntervalMinutes,
   InvalidAgentScanResultError,
   InvalidEnrollmentTokenError,
+  InvalidAgentPairingError,
   renewAgentTaskLease,
   saveAgentLocalScanResult,
   saveAgentScanResult,
@@ -39,6 +42,56 @@ async function authenticate(request: FastifyRequest, reply: FastifyReply) {
 }
 
 export const agentRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.post("/agent/pairings", {
+    config: {
+      rateLimit: { max: 5, timeWindow: 15 * 60 * 1000 },
+    },
+    handler: async (request, reply) => {
+      const input = z
+        .object({
+          pairingSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+          name: z.string().trim().min(1).max(128),
+          osName: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9 .()_-]+$/),
+          monitoredRoot: z.string().trim().min(1).max(4096),
+        })
+        .safeParse(request.body);
+      if (!input.success) {
+        return reply.status(400).send({ error: "INVALID_AGENT_PAIRING" });
+      }
+
+      try {
+        const pairing = await createAgentPairing(input.data);
+        return reply.status(201).send(pairing);
+      } catch (error) {
+        if (error instanceof InvalidAgentPairingError) {
+          return reply.status(400).send({ error: "INVALID_AGENT_PAIRING" });
+        }
+        throw error;
+      }
+    },
+  });
+
+  fastify.get<{ Params: { id: string } }>(
+    "/agent/pairings/:id",
+    {
+      config: {
+        rateLimit: { max: 180, timeWindow: 15 * 60 * 1000 },
+      },
+    },
+    async (request, reply) => {
+      const pairingId = z.string().uuid().safeParse(request.params.id);
+      const secret = bearerToken(request);
+      if (!pairingId.success || !secret) {
+        return reply.status(401).send({ error: "INVALID_AGENT_PAIRING" });
+      }
+      const status = await getAgentPairingStatus(pairingId.data, secret);
+      if (status.status === "expired") {
+        return reply.status(410).send({ error: "PAIRING_EXPIRED" });
+      }
+      return reply.send(status);
+    }
+  );
+
   fastify.post("/agent/enroll", async (request, reply) => {
     const input = AgentEnrollmentSchema.safeParse(request.body);
     if (!input.success) {

@@ -1,7 +1,8 @@
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { scan, normalizePath, serializeScanResult } from "@change-detective/scanner";
 import { z } from "zod";
 import {
@@ -87,15 +88,11 @@ async function loadConfig(): Promise<AgentConfig> {
   }
 
   const apiUrlValue = process.env["CD_API_URL"];
-  const enrollmentToken = process.env["CD_ENROLLMENT_TOKEN"];
   const rootValue = process.env["CD_MONITORED_ROOT"];
-  if (!apiUrlValue || !enrollmentToken || !rootValue) {
+  if (!apiUrlValue || !rootValue) {
     throw new Error(
-      "First run requires CD_API_URL, CD_ENROLLMENT_TOKEN, and CD_MONITORED_ROOT."
+      "First run requires CD_API_URL and CD_MONITORED_ROOT."
     );
-  }
-  if (!/^[A-Za-z0-9_-]{43}$/.test(enrollmentToken)) {
-    throw new Error("The enrollment token has an invalid format.");
   }
   if (!isAbsolute(rootValue)) {
     throw new Error("CD_MONITORED_ROOT must be an absolute path for this operating system.");
@@ -108,36 +105,77 @@ async function loadConfig(): Promise<AgentConfig> {
   }
 
   const apiUrl = normalizeApiUrl(apiUrlValue);
-  const enrollment = await requestJson(
-    apiUrl,
-    "/api/agent/enroll",
-    {
-      method: "POST",
-      body: {
-        enrollmentToken,
-        name: hostname(),
-        osName: getAgentOsName(),
-        monitoredRoot,
-      },
-    }
-  );
-  const enrolled = z
-    .object({
-      deviceId: z.string().uuid(),
-      agentToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-    })
-    .parse(enrollment);
-
-  const config = AgentConfigSchema.parse({
-    apiUrl,
-    deviceId: enrolled.deviceId,
-    agentToken: enrolled.agentToken,
-    monitoredRoot,
+  const pairingSecret = randomBytes(32).toString("base64url");
+  const pairingResponse = await requestJson(apiUrl, "/api/agent/pairings", {
+    method: "POST",
+    body: {
+      pairingSecret,
+      name: hostname(),
+      osName: getAgentOsName(),
+      monitoredRoot,
+    },
   });
-  await saveConfig(config);
-  delete process.env["CD_ENROLLMENT_TOKEN"];
-  console.log(`Enrolled this ${getAgentOsName()} device (${config.deviceId}).`);
-  return config;
+  const pairing = z
+    .object({
+      pairingId: z.string().uuid(),
+      expiresAt: z.string().datetime(),
+    })
+    .parse(pairingResponse);
+  const verificationUrl = new URL(
+    `/pair-device/${encodeURIComponent(pairing.pairingId)}`,
+    apiUrl
+  ).toString();
+  console.log("Approve this device in your browser to finish setup.");
+  console.log(`Pairing page: ${verificationUrl}`);
+  openExternalUrl(verificationUrl);
+
+  while (Date.now() < new Date(pairing.expiresAt).getTime()) {
+    const status = z
+      .discriminatedUnion("status", [
+        z.object({ status: z.literal("pending") }),
+        z.object({ status: z.literal("approved"), deviceId: z.string().uuid() }),
+      ])
+      .parse(
+        await requestJson(
+          apiUrl,
+          `/api/agent/pairings/${encodeURIComponent(pairing.pairingId)}`,
+          { method: "GET", token: pairingSecret }
+        )
+      );
+    if (status.status === "approved") {
+      const config = AgentConfigSchema.parse({
+        apiUrl,
+        deviceId: status.deviceId,
+        agentToken: pairingSecret,
+        monitoredRoot,
+      });
+      await saveConfig(config);
+      console.log(`Paired this ${getAgentOsName()} device (${config.deviceId}).`);
+      return config;
+    }
+    await sleep(5);
+  }
+  throw new Error("Device pairing expired. Restart the sensor to request a new pairing.");
+}
+
+function openExternalUrl(url: string): void {
+  const command =
+    process.platform === "win32"
+      ? "rundll32.exe"
+      : process.platform === "darwin"
+        ? "open"
+        : "xdg-open";
+  const args =
+    process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.on("error", () => {
+    console.warn("Could not open a browser automatically; use the pairing page URL above.");
+  });
+  child.unref();
 }
 
 function getAgentOsName(): string {

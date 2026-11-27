@@ -43,7 +43,8 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
         .then((session) => {
           if (!active || currentVerification !== verificationId) return;
           if (!session.authenticated) {
-            router.replace("/login");
+            const next = `${window.location.pathname}${window.location.search}`;
+            router.replace(`/login?next=${encodeURIComponent(next)}`);
             return;
           }
           setVerifiedPath(pathname);

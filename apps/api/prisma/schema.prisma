@@ -17,37 +17,39 @@ datasource db {
 }
 
 model User {
-  id              String   @id @default(uuid()) @db.Uuid
-  email           String   @unique
-  googleSubject   String?  @unique @map("google_subject")
-  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz
-  privacyNoticeVersion String? @map("privacy_notice_version")
-  privacyAcceptedAt DateTime? @map("privacy_accepted_at") @db.Timestamptz
-  sessionVersion  Int      @default(0) @map("session_version")
-  isLegacy        Boolean  @default(false) @map("is_legacy")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+  id                   String    @id @default(uuid()) @db.Uuid
+  email                String    @unique
+  googleSubject        String?   @unique @map("google_subject")
+  emailVerifiedAt      DateTime? @map("email_verified_at") @db.Timestamptz
+  privacyNoticeVersion String?   @map("privacy_notice_version")
+  privacyAcceptedAt    DateTime? @map("privacy_accepted_at") @db.Timestamptz
+  sessionVersion       Int       @default(0) @map("session_version")
+  isLegacy             Boolean   @default(false) @map("is_legacy")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz
 
   devices          Device[]
   settings         Settings?
   agentEnrollments AgentEnrollment[]
+  agentPairings    AgentPairing[]
 
   @@map("users")
 }
 
 model Device {
-  id              String    @id @default(uuid()) @db.Uuid
-  userId          String    @map("user_id") @db.Uuid
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name            String
-  osName          String    @default("Windows") @map("os_name")
-  monitoredRoot   String?   @map("monitored_root")
-  agentTokenHash  String?   @unique @map("agent_token_hash")
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  lastSeenAt      DateTime? @map("last_seen_at") @db.Timestamptz
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name           String
+  osName         String    @default("Windows") @map("os_name")
+  monitoredRoot  String?   @map("monitored_root")
+  agentTokenHash String?   @unique @map("agent_token_hash")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz
 
   scans    Scan[]
   findings Finding[]
+  pairing  AgentPairing?
 
   @@index([userId, createdAt], name: "devices_user_created_idx")
   @@map("devices")
@@ -65,6 +67,25 @@ model AgentEnrollment {
   @@map("agent_enrollments")
 }
 
+model AgentPairing {
+  id                String   @id @default(uuid()) @db.Uuid
+  name              String
+  osName            String   @map("os_name")
+  monitoredRoot     String   @map("monitored_root")
+  pairingSecretHash String   @unique @map("pairing_secret_hash")
+  status            String   @default("pending")
+  userId            String?  @map("user_id") @db.Uuid
+  user              User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId          String?  @unique @map("device_id") @db.Uuid
+  device            Device?  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  expiresAt         DateTime @map("expires_at") @db.Timestamptz
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId])
+  @@index([status, expiresAt])
+  @@map("agent_pairings")
+}
+
 model Settings {
   id                       Int      @id @default(autoincrement())
   userId                   String   @unique @map("user_id") @db.Uuid
@@ -79,21 +100,21 @@ model Settings {
 }
 
 model Scan {
-  id                        String    @id @default(uuid()) @db.Uuid
-  device                    Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  deviceId                  String    @map("device_id") @db.Uuid
-  rootPath                  String    @map("root_path")
-  triggerType               String    @map("trigger_type") // "manual" | "scheduled" | "event"
-  status                    String    // "queued"|"running"|"completed"|"partial"|"failed"|"cancelled"
-  startedAt                 DateTime  @default(now()) @map("started_at") @db.Timestamptz
-  agentLeaseUntil           DateTime? @map("agent_lease_until") @db.Timestamptz
-  completedAt               DateTime? @map("completed_at") @db.Timestamptz
+  id                         String    @id @default(uuid()) @db.Uuid
+  device                     Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  deviceId                   String    @map("device_id") @db.Uuid
+  rootPath                   String    @map("root_path")
+  triggerType                String    @map("trigger_type") // "manual" | "scheduled" | "event"
+  status                     String // "queued"|"running"|"completed"|"partial"|"failed"|"cancelled"
+  startedAt                  DateTime  @default(now()) @map("started_at") @db.Timestamptz
+  agentLeaseUntil            DateTime? @map("agent_lease_until") @db.Timestamptz
+  completedAt                DateTime? @map("completed_at") @db.Timestamptz
   // BIGINT stored as String in Prisma to avoid JS number precision loss
-  totalBytes                String?   @map("total_bytes")
-  freeBytes                 String?   @map("free_bytes")
-  scannedDirectoryCount     Int       @default(0) @map("scanned_directory_count")
-  inaccessibleDirectoryCount Int      @default(0) @map("inaccessible_directory_count")
-  errorMessage              String?   @map("error_message")
+  totalBytes                 String?   @map("total_bytes")
+  freeBytes                  String?   @map("free_bytes")
+  scannedDirectoryCount      Int       @default(0) @map("scanned_directory_count")
+  inaccessibleDirectoryCount Int       @default(0) @map("inaccessible_directory_count")
+  errorMessage               String?   @map("error_message")
 
   directories DirectorySnapshot[]
   findings    Finding[]
@@ -103,14 +124,14 @@ model Scan {
 }
 
 model DirectorySnapshot {
-  scan              Scan    @relation(fields: [scanId], references: [id], onDelete: Cascade)
-  scanId            String  @map("scan_id") @db.Uuid
-  normalizedPath    String  @map("normalized_path")
-  displayName       String  @map("display_name")
+  scan                Scan    @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  scanId              String  @map("scan_id") @db.Uuid
+  normalizedPath      String  @map("normalized_path")
+  displayName         String  @map("display_name")
   // BIGINT as String
-  sizeBytes         String  @map("size_bytes")
-  filesCount        String? @map("files_count")
-  directoriesCount  String? @map("directories_count")
+  sizeBytes           String  @map("size_bytes")
+  filesCount          String? @map("files_count")
+  directoriesCount    String? @map("directories_count")
   measurementComplete Boolean @default(true) @map("measurement_complete")
 
   @@id([scanId, normalizedPath])
@@ -124,7 +145,7 @@ model Finding {
   scan        Scan?     @relation(fields: [scanId], references: [id], onDelete: SetNull)
   scanId      String?   @map("scan_id") @db.Uuid
   findingType String    @map("finding_type")
-  severity    String    // "info" | "warning" | "critical"
+  severity    String // "info" | "warning" | "critical"
   title       String
   description String
   // Structured JSON evidence
@@ -135,4 +156,3 @@ model Finding {
   @@index([deviceId, createdAt(sort: Desc)], name: "findings_device_created_idx")
   @@map("findings")
 }
-

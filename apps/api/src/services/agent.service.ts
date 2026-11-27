@@ -7,6 +7,7 @@ import type { AgentScanResult } from "../schemas/agent.js";
 import { isAgentRootAbsolute } from "../schemas/agent-enrollment.js";
 
 const ENROLLMENT_TTL_MS = 15 * 60 * 1000;
+const PAIRING_TTL_MS = 10 * 60 * 1000;
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -31,6 +32,148 @@ export async function createAgentEnrollment(userId: string): Promise<{
 
 export class InvalidEnrollmentTokenError extends Error {}
 export class InvalidAgentRootError extends Error {}
+export class InvalidAgentPairingError extends Error {}
+
+export async function createAgentPairing(input: {
+  pairingSecret: string;
+  name: string;
+  osName: string;
+  monitoredRoot: string;
+}): Promise<{ pairingId: string; expiresAt: Date }> {
+  if (
+    !/^[A-Za-z0-9_-]{43}$/.test(input.pairingSecret) ||
+    !isAgentRootAbsolute(input.osName, input.monitoredRoot) ||
+    input.monitoredRoot.includes("\0")
+  ) {
+    throw new InvalidAgentPairingError("The pairing request is invalid.");
+  }
+
+  const expiresAt = new Date(Date.now() + PAIRING_TTL_MS);
+  const expiredBefore = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  await prisma.agentPairing.deleteMany({
+    where: {
+      OR: [
+        { status: "pending", expiresAt: { lte: new Date() } },
+        { status: "approved", expiresAt: { lte: expiredBefore } },
+      ],
+    },
+  });
+  const pairing = await prisma.agentPairing.create({
+    data: {
+      pairingSecretHash: hashToken(input.pairingSecret),
+      name: input.name,
+      osName: input.osName,
+      monitoredRoot: normalizePath(input.monitoredRoot),
+      expiresAt,
+    },
+    select: { id: true },
+  });
+  return { pairingId: pairing.id, expiresAt };
+}
+
+export async function getAgentPairingStatus(
+  pairingId: string,
+  pairingSecret: string
+): Promise<{ status: "pending" | "approved" | "expired"; deviceId?: string }> {
+  const pairing = await prisma.agentPairing.findFirst({
+    where: {
+      id: pairingId,
+      pairingSecretHash: hashToken(pairingSecret),
+    },
+    select: { status: true, deviceId: true, expiresAt: true },
+  });
+  if (!pairing) {
+    return { status: "expired" };
+  }
+  if (pairing.status === "approved" && pairing.deviceId) {
+    return { status: "approved", deviceId: pairing.deviceId };
+  }
+  if (pairing.expiresAt <= new Date()) {
+    return { status: "expired" };
+  }
+  return { status: "pending" };
+}
+
+export async function getAgentPairingRequest(pairingId: string) {
+  const pairing = await prisma.agentPairing.findUnique({
+    where: { id: pairingId },
+    select: {
+      name: true,
+      osName: true,
+      monitoredRoot: true,
+      status: true,
+      expiresAt: true,
+    },
+  });
+  if (!pairing) {
+    return { status: "expired" as const };
+  }
+  if (pairing.status !== "pending") {
+    return { status: "completed" as const };
+  }
+  if (pairing.expiresAt <= new Date()) {
+    return { status: "expired" as const };
+  }
+  return {
+    status: "pending" as const,
+    name: pairing.name,
+    osName: pairing.osName,
+    monitoredRoot: pairing.monitoredRoot,
+    expiresAt: pairing.expiresAt,
+  };
+}
+
+export async function approveAgentPairing(
+  userId: string,
+  pairingId: string
+): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const pairing = await tx.agentPairing.findFirst({
+      where: { id: pairingId, status: "pending", expiresAt: { gt: now } },
+      select: {
+        id: true,
+        name: true,
+        osName: true,
+        monitoredRoot: true,
+        pairingSecretHash: true,
+      },
+    });
+    if (!pairing) return false;
+    if (
+      !isAgentRootAbsolute(pairing.osName, pairing.monitoredRoot) ||
+      pairing.monitoredRoot.includes("\0")
+    ) {
+      throw new InvalidAgentPairingError(
+        "The pairing request contains an invalid monitored path."
+      );
+    }
+
+    const deviceId = randomUUID();
+    const claimed = await tx.agentPairing.updateMany({
+      where: { id: pairingId, status: "pending", expiresAt: { gt: now } },
+      data: { status: "approved", userId },
+    });
+    if (claimed.count !== 1) return false;
+
+    await tx.device.create({
+      data: {
+        id: deviceId,
+        userId,
+        name: pairing.name,
+        osName: pairing.osName,
+        monitoredRoot: normalizePath(pairing.monitoredRoot),
+        agentTokenHash: pairing.pairingSecretHash,
+        lastSeenAt: now,
+      },
+    });
+    await tx.agentPairing.update({
+      where: { id: pairingId },
+      data: { deviceId },
+    });
+    return true;
+  });
+}
 
 export async function updateAgentMonitoredRoot(
   userId: string,

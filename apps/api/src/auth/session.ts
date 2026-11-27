@@ -6,6 +6,7 @@ import { prisma } from "../db/client.js";
 export const SESSION_COOKIE_NAME = "change_detective_session";
 export const SESSION_TTL_SECONDS = 12 * 60 * 60;
 export const GOOGLE_STATE_COOKIE_NAME = "change_detective_google_state";
+export const GOOGLE_RETURN_COOKIE_SEPARATOR = ".";
 
 const PUBLIC_PATHS = new Set([
   "/api/health",
@@ -16,6 +17,8 @@ const PUBLIC_PATHS = new Set([
 ]);
 const AGENT_PATHS = [
   /^\/api\/agent\/enroll$/,
+  /^\/api\/agent\/pairings$/,
+  /^\/api\/agent\/pairings\/[0-9a-f-]{36}$/i,
   /^\/api\/agent\/tasks\/next$/,
   /^\/api\/agent\/scans\/[0-9a-f-]{36}\/(?:heartbeat|results)$/i,
 ];
@@ -202,10 +205,48 @@ export function clearSessionCookie(secure: boolean): string {
   return `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure ? "; Secure" : ""}`;
 }
 
-export function createGoogleStateCookie(state: string, secure: boolean): string {
-  return `${GOOGLE_STATE_COOKIE_NAME}=${state}; HttpOnly; SameSite=Lax; Path=/api; Max-Age=600${secure ? "; Secure" : ""}`;
+export function createGoogleStateCookie(
+  state: string,
+  secure: boolean,
+  returnTo = "/"
+): string {
+  const safeReturnTo = isSafeReturnPath(returnTo) ? returnTo : "/";
+  const value = `${state}${GOOGLE_RETURN_COOKIE_SEPARATOR}${Buffer.from(safeReturnTo).toString("base64url")}`;
+  return `${GOOGLE_STATE_COOKIE_NAME}=${value}; HttpOnly; SameSite=Lax; Path=/api; Max-Age=600${secure ? "; Secure" : ""}`;
 }
 
 export function clearGoogleStateCookie(secure: boolean): string {
   return `${GOOGLE_STATE_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/api; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure ? "; Secure" : ""}`;
+}
+
+export function readGoogleStateCookie(
+  value: string | undefined
+): { state: string; returnTo: string } | null {
+  if (!value) return null;
+  const separator = value.indexOf(GOOGLE_RETURN_COOKIE_SEPARATOR);
+  if (separator <= 0) return null;
+  const state = value.slice(0, separator);
+  const encodedReturnTo = value.slice(separator + 1);
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(state)) return null;
+
+  let returnTo = "/";
+  try {
+    const decoded = Buffer.from(encodedReturnTo, "base64url").toString("utf8");
+    if (isSafeReturnPath(decoded)) returnTo = decoded;
+  } catch {
+    return null;
+  }
+  return { state, returnTo };
+}
+
+function isSafeReturnPath(value: string): boolean {
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) {
+    return false;
+  }
+  try {
+    return new URL(value, "https://change-detective.invalid").origin ===
+      "https://change-detective.invalid";
+  } catch {
+    return false;
+  }
 }

@@ -36,7 +36,12 @@ export default function LoginPage() {
       setError("Read and accept the privacy notice to continue.");
       return;
     }
-    window.location.assign("/api/auth/google?acceptPrivacy=true");
+    const next = new URLSearchParams(window.location.search).get("next");
+    const query = new URLSearchParams({ acceptPrivacy: "true" });
+    if (next?.startsWith("/") && !next.startsWith("//") && !next.includes("\\")) {
+      query.set("next", next);
+    }
+    window.location.assign(`/api/auth/google?${query.toString()}`);
   }
 
   return (

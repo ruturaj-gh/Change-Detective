@@ -1,0 +1,78 @@
+name: Build agent bundles
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "agent-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} agent bundle
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test --workspace @change-detective/scanner
+      - run: npm test --workspace @change-detective/agent
+      - run: npm run package:standalone --workspace @change-detective/agent
+      - name: Archive Linux bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bundle="$(find apps/agent/dist/standalone -maxdepth 1 -type d -name 'change-detective-agent-linux-*' -print -quit)"
+          tar -czf "$bundle.tar.gz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+      - name: Archive Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = (Get-ChildItem apps/agent/dist/standalone -Directory -Filter "change-detective-agent-win32-*").FullName
+          Compress-Archive -Path "$bundle/*" -DestinationPath "$bundle.zip"
+      - name: Archive macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bundle="$(find apps/agent/dist/standalone -maxdepth 1 -type d -name 'change-detective-agent-darwin-*' -print -quit)"
+          tar -czf "$bundle.tar.gz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: change-detective-agent-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            apps/agent/dist/standalone/*.zip
+            apps/agent/dist/standalone/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/agent-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: change-detective-agent-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes
+          gh release upload "$TAG" release-assets/* --clobber

@@ -10,6 +10,8 @@
     "pretypecheck": "npm run build:scanner",
     "agent:start": "tsx src/index.ts",
     "build": "tsc",
+    "prepackage:standalone": "npm run build",
+    "package:standalone": "node scripts/package-agent.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/local-store.test.ts tests/file-change-monitor.test.ts"
   },

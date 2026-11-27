@@ -11,13 +11,17 @@ import {
   createSessionToken,
   GOOGLE_STATE_COOKIE_NAME,
   type AuthConfig,
+  readGoogleStateCookie,
 } from "../auth/session.js";
 
 interface AuthRouteOptions {
   authConfig: AuthConfig;
 }
 
-const GoogleStartQuery = z.object({ acceptPrivacy: z.literal("true") });
+const GoogleStartQuery = z.object({
+  acceptPrivacy: z.literal("true"),
+  next: z.string().max(2048).optional(),
+});
 const GoogleCallbackQuery = z.object({
   code: z.string().min(1).max(4096).optional(),
   state: z.string().min(32).max(128).optional(),
@@ -59,6 +63,25 @@ function safeEqual(left: string, right: string): boolean {
   );
 }
 
+function safeReturnPath(value: string | undefined): string {
+  if (
+    !value ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.includes("\\")
+  ) {
+    return "/";
+  }
+  try {
+    return new URL(value, "https://change-detective.invalid").origin ===
+      "https://change-detective.invalid"
+      ? value
+      : "/";
+  } catch {
+    return "/";
+  }
+}
+
 function loginErrorUrl(config: AuthConfig, error: string): string {
   const url = new URL("/login", config.publicAppUrl);
   url.searchParams.set("error", error);
@@ -83,7 +106,10 @@ export const authRoutes: FastifyPluginAsync<AuthRouteOptions> = async (
     const state = randomBytes(32).toString("base64url");
     const secure = process.env["NODE_ENV"] === "production";
     return reply
-      .header("Set-Cookie", createGoogleStateCookie(state, secure))
+      .header(
+        "Set-Cookie",
+        createGoogleStateCookie(state, secure, safeReturnPath(query.data.next))
+      )
       .redirect(
         client.generateAuthUrl({
           access_type: "online",
@@ -103,11 +129,12 @@ export const authRoutes: FastifyPluginAsync<AuthRouteOptions> = async (
         request.headers.cookie,
         GOOGLE_STATE_COOKIE_NAME
       );
+      const stateData = readGoogleStateCookie(stateCookie);
       const stateMatches =
         query.success &&
         query.data.state &&
-        stateCookie &&
-        safeEqual(query.data.state, stateCookie);
+        stateData &&
+        safeEqual(query.data.state, stateData.state);
       const clearState = clearGoogleStateCookie(secure);
 
       if (
@@ -158,7 +185,10 @@ export const authRoutes: FastifyPluginAsync<AuthRouteOptions> = async (
         const sessionCookie = createSessionCookie(sessionToken, secure);
         return reply
           .header("Set-Cookie", [clearState, sessionCookie])
-          .redirect(new URL("/", authConfig.publicAppUrl).toString(), 303);
+          .redirect(
+            new URL(stateData.returnTo, authConfig.publicAppUrl).toString(),
+            303
+          );
       } catch (error) {
         fastify.log.error(
           { errorType: error instanceof Error ? error.name : "UnknownError" },

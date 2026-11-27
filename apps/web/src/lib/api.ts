@@ -101,6 +101,14 @@ export interface Device {
   lastSeenAt: string | null;
 }
 
+export interface AgentPairingRequest {
+  status: "pending" | "completed" | "expired";
+  name?: string;
+  osName?: string;
+  monitoredRoot?: string;
+  expiresAt?: string;
+}
+
 export interface Scan {
   id: string;
   deviceId: string;
@@ -200,9 +208,13 @@ export const api = {
   },
 
   agents: {
-    enroll: () =>
-      post<{ enrollmentToken: string; expiresAt: string }>(
-        "/agents/enrollment"
+    pairing: (id: string) =>
+      get<{ pairing: AgentPairingRequest }>(
+        `/agents/pairings/${encodeURIComponent(id)}`
+      ),
+    approvePairing: (id: string) =>
+      post<{ approved: boolean }>(
+        `/agents/pairings/${encodeURIComponent(id)}/approve`
       ),
     revoke: (id: string) =>
       del<{ revoked: boolean }>(`/agents/${encodeURIComponent(id)}`),

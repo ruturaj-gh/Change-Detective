@@ -215,10 +215,15 @@ curl http://127.0.0.1:3001/api/health
 
 ## Accounts and remote scanning agents
 
-Each account has isolated devices, scan history, findings, and settings. Users
-can enroll multiple devices from Settings. Device records are tied to the
-account that generated the one-time enrollment token; agent tokens are stored
-as hashes. The service does not use MAC addresses for identity.
+Each account has isolated devices, scan history, findings, and settings. New
+Windows and Linux sensors pair by opening a short-lived approval page in the
+user's browser. The signed-in user reviews the device name, operating system,
+and monitored folder before approving it. The sensor creates its own
+high-entropy credential, which is stored locally with restricted permissions
+and stored on the server only as a hash. Revoke access in Settings at any
+time. Older source-based agents can still use the legacy one-time enrollment
+flow during the transition. The service does not use MAC addresses for
+identity.
 
 The agent polls the API over HTTPS for scan requests and uploads directory-level
 measurements. It does not open an inbound port. It only scans the absolute root
@@ -242,38 +247,52 @@ platform backend (inotify on Linux, ReadDirectoryChangesW on Windows, and
 FSEvents on macOS). If the platform cannot watch the approved root, the agent
 logs that event monitoring is unavailable and continues with periodic scans.
 
+#### Self-contained Windows and Linux sensor bundles
+
+The sensor bundles include the agent, production dependencies, and the
+matching Node runtime, so the target computer does not need Node.js or a
+repository checkout. These are portable bundles, not signed graphical
+installers: first run prompts for the dashboard URL and monitored folder, then
+opens a browser approval page. The user must sign in and approve the device.
+
+To build a bundle for the current OS and architecture on a development
+machine, run:
+
+```bash
+npm run package:standalone --workspace @change-detective/agent
+```
+
+The current platform bundle is written under
+`apps/agent/dist/standalone/`. Run `start-agent.sh` on Linux or
+double-click `Start-ChangeDetective.cmd` on Windows. The
+`Build agent bundles` GitHub Actions workflow builds and archives Windows,
+Linux, and macOS bundles on native runners when manually dispatched. Pushing
+an `agent-v*` tag also publishes release assets. Windows and macOS releases
+are not signed yet; users may see operating-system warnings.
+
 For a hosted setup:
 
 1. Apply migrations and configure the API with `SCAN_MODE=agent`, production
    authentication/email variables, and PostgreSQL. Keep the API private behind the
    web application/reverse proxy; expose only the HTTPS web endpoint.
-2. Sign in, open **Settings**, and create a one-time enrollment token.
-3. Each user signs in to their own account. On a scanning computer, install Node.js 20+, clone/install this project,
-   select the matching Bash or PowerShell setup snippet in Settings, and enter
-   the token at its hidden prompt. The enrollment token expires after 15 minutes
-   and is single-use. Android users need Termux with Node.js and must run
-   `termux-setup-storage` before choosing an accessible monitored directory.
-4. Keep the agent process running. Dashboard scans are queued for it;
+2. Sign in, open **Settings**, download the Windows or Linux sensor bundle,
+   and transfer it to the computer to scan. The sensor asks for the dashboard
+   HTTPS URL and an absolute folder path, then opens a browser page. Sign in
+   and verify the displayed device and folder before approving the pairing.
+   Android currently requires Termux with Node.js and
+   `termux-setup-storage`; a native Android app is planned.
+3. Keep the sensor process running. Dashboard scans are queued for it;
    it polls every 30 seconds and renews long-running task leases. Periodic
    local scans and event-triggered rescans run independently of dashboard
-   requests. Build the agent before installing a per-user startup task:
-   - Linux: `bash apps/agent/scripts/install-linux-user-service.sh`
-     (systemd user service); remove with
-     `bash apps/agent/scripts/uninstall-linux-user-service.sh`.
-   - macOS: `bash apps/agent/scripts/install-macos-launch-agent.sh`
-     (LaunchAgent); remove with
-     `bash apps/agent/scripts/uninstall-macos-launch-agent.sh`.
-   - Windows: run
-     `.\apps\agent\scripts\install-windows-startup.ps1` from the repository
-     root in PowerShell (Task Scheduler); remove with
-     `.\apps\agent\scripts\uninstall-windows-startup.ps1`.
-5. To revoke access, use **Revoke access** in Settings. Existing snapshots are
+   requests. The current portable bundles run in a terminal; automatic
+   startup installation is not included in the end-user bundles yet.
+4. To revoke access, use **Revoke access** in Settings. Existing snapshots are
    retained, while queued/running scans are failed.
 
-The systemd user service, LaunchAgent, and Windows logon task all run the
-agent as the current user; none requires a kernel module or administrator
-privileges for ordinary user-owned roots. A packaged installer, deployment
-automation, and live database/reverse-proxy validation remain future work.
+Developer-oriented systemd user service, LaunchAgent, and Windows logon task
+scripts remain in the repository. The end-user bundles do not yet install
+startup services. Graphical installers, code signing, deployment automation,
+and live database/reverse-proxy validation remain future work.
 Android/Termux is best-effort and depends on filesystem API and permission
 support. If changing the monitored root, update the local agent configuration
 file as well. After revoking an agent, remove its saved local credential and
